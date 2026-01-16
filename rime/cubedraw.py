@@ -1,8 +1,8 @@
-import time
 import numpy as np  # 导入 NumPy 库，用于数值计算和处理多维数组
 import pygame  # 导入 Pygame 库，用于游戏开发和图形界面设计
 import math
 from rime.cube import StickerCube, CubeBase
+from rime.cubie import CubieBase
 
 
 class CubeDraw:
@@ -143,7 +143,7 @@ class BaseCubeRenderer:
     def compute_face_quads(self):
         # similar to previous helper: for each sticker produce its quad in model space
         # list of (face, i, j, quad_points)
-        for face in self.cube.FACES:
+        for face in CubieBase.FACES:
             quads = CubeBase.face_quads(face, self.n)
             for idx, quad in enumerate(quads):
                 i = idx // self.n
@@ -177,8 +177,8 @@ class CubeRenderer(BaseCubeRenderer):
     #     'B': (0, 0, 255),  # 蓝
     # }
 
-    def __init__(self, cube: "StickerCube", scale: float = None, screen=None):
-        super().__init__(cube, scale=scale or min(self.WIDTH, self.HEIGHT) * 0.45 / cube.n)  # 每个小方块大小缩放
+    def __init__(self, cube: "StickerCube", screen=None):
+        super().__init__(cube, scale=min(self.WIDTH, self.HEIGHT) * 0.45 / cube.n)  # 每个小方块大小缩放
 
         self.offset = -self.n / 2  # 三维坐标范围 [-n/2, +n/2]
         self.center = (self.WIDTH // 2, self.HEIGHT // 2)
@@ -469,6 +469,7 @@ class RubiksCubeDraw:
         pending_moves = []
         pygame.display.set_caption("Interactive Rubik's Cube (Left drag=view, Right drag=turn)")
         running = True
+        cubie = CubieBase(n=self.cube.n)
 
         while running:
             dt = self.clock.tick(60) / 1000.0
@@ -497,6 +498,12 @@ class RubiksCubeDraw:
                     elif ev.key == pygame.K_s:  # 生成并播放 scramble 序列
                         pending_moves = self.cube.scramble(25)
                         self.enqueue_moves(pending_moves)
+                    elif ev.key == pygame.K_k:
+                        pending_moves = cubie.solve_sticker(self.cube.get_state())
+                        print(len(pending_moves))
+                        self.enqueue_moves(pending_moves)
+                    elif ev.key == pygame.K_l:
+                        print(self.cube.color)
                     elif ev.key == pygame.K_c:  # 清空 pending 队列
                         # clear pending
                         self.pending.clear()
@@ -518,7 +525,7 @@ if __name__ == "__main__":
     # 如果脚本被直接运行，则执行主函数
     # CubeDraw.main()
 
-    cube = StickerCube(n=7)  # 初始解法状态
+    cube = StickerCube(n=3)  # 初始解法状态
     # mv = cube.scramble(20)
     # cube.apply(mv)
     # CubeRenderer.run(cube)

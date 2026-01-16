@@ -17,8 +17,8 @@ class OpenGLCubeRenderer(BaseCubeRenderer):
         'B': (0.0, 0.3, 0.8),
     }
 
-    def __init__(self, cube, width=1000, height=1000, scale: float = None):
-        super().__init__(cube, scale=scale or (2.8 / cube.n))  # n * sqrt(3)
+    def __init__(self, cube, width=1000, height=1000,):
+        super().__init__(cube, scale= (2.8 / cube.n))  # n * sqrt(3)
         self.width = width
         self.height = height
 

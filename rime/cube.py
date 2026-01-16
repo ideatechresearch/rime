@@ -1,4 +1,4 @@
-from rime.base import class_property, class_cache, chainable_method
+from rime.base import class_property, class_cache, chainable_method, class_status
 import numpy as np
 import random, math
 from collections import deque, defaultdict
@@ -96,6 +96,7 @@ class CubeBase:
     # positions index（position on cube）
     SLICE_POSITIONS = tuple(i for i, (_, y, _) in enumerate(EDGE_POS_SIGNS) if y == 0)  # slice {FR, FL, BL, BR},从前向后扫描
     NON_SLICE_POSITIONS = tuple(i for i, (_, y, _) in enumerate(EDGE_POS_SIGNS) if y != 0)
+
     # [0, 1, 2, 3, 8, 9, 10, 11] 非 slice [i for i in range(12) if i not in SLICE_POSITIONS]
 
     # # Define corner and edge positions
@@ -130,6 +131,18 @@ class CubeBase:
 
     def is_solved_idx(self, state_idx: np.ndarray) -> bool:
         return bool(np.array_equal(self.idx_to_state(state_idx), self.solved))
+
+    def diff_coords(self, state: np.ndarray) -> np.ndarray:
+        diff_mask = state != self.solved
+        return np.argwhere(diff_mask)  # nonzero
+
+    def heuristic(self, state: np.ndarray):
+        """
+        估价函数：错误块的数量（简单启发）,对 BFS/IDA*/Beam search 可用,小魔方适用
+        heuristic(embedding)
+        """
+        errors = np.count_nonzero(state != self.solved)
+        return errors // max(1, self.n)  # 每个错误影响多个面
 
     @staticmethod
     def encode(state: np.ndarray) -> bytes:
@@ -171,28 +184,40 @@ class CubeBase:
         return np.concatenate([self.get_corners(state).ravel(), self.get_edges(state).ravel()]).astype(np.uint8)
 
     def solved_corners_map(self) -> dict:
+        """
+        角块的 cubie id
+        用字典加速 lookup，建立 solved corner 的颜色集合 → index 映射
+        忽略朝向，否则同一个块旋转后会被误认为不同块,角块的 twist 信息在贴纸级处理里丢失
+        slot 0 为 reference （基准面）
+        """
         solved = self.get_corners(self.solved)  # (8, 3) np.sort(, axis=1)
-        # 用字典加速 lookup，建立 solved corner 的颜色集合 → index 映射
-        # 忽略朝向，否则同一个块旋转后会被误认为不同块,角块的 twist 信息在贴纸级处理里丢失
-        return {frozenset(c): pid for pid, c in enumerate(solved)}
+        return {frozenset(c): (pid, c[0]) for pid, c in enumerate(solved)}
 
-    def corner_ids(self, state: np.ndarray) -> np.ndarray:
+    def corner_ids_ori(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
         返回每个 corner 对应的 piece id（0~7）, corners_perm (8)
         perm 表示 piece 的重排，当前位置 i 的角块，原来是 solved 的哪一块？ 群作用矩阵里计算 twist
+        corner_ori 不是物理量，是约定量
         """
         corners = self.get_corners(state)
         perm = np.empty(8, dtype=np.int8)
+        ori = np.empty(8, dtype=np.int8)
         for i, c in enumerate(corners):
-            perm[i] = self.SOLVED_CORNERS_MAP[frozenset(c)]
-        return perm
+            pid, ref = self.SOLVED_CORNERS_MAP[frozenset(c)]
+            perm[i] = pid
+            ori[i] = list(c).index(ref)  # 0/1/2 np.roll(c, -k)
+        ori[-1] = (-ori[:-1].sum()) % 3  # 修正最后一个角方向,把 orientation 投影到合法子空间
+        return perm, ori
 
     def heuristic_corner_perm(self, state: np.ndarray):
-        corners_perm = self.corner_ids(state)
+        corners_perm, _ = self.corner_ids_ori(state)
         return np.count_nonzero(corners_perm != np.arange(8))
 
     def solved_edges_map(self) -> dict:
-        # 标准顺序,依赖 solved_edges 的正确定义（顺序必须匹配参考色先）
+        """
+        标准顺序,依赖 solved_edges 的正确定义（顺序必须匹配参考色先）
+        cubie id : ref  0/1
+        """
         solved = self.get_edges(self.solved)  # (12, 2)
         edge_map = {}
         for pid in range(12):
@@ -210,6 +235,7 @@ class CubeBase:
             pid, o = self.SOLVED_EDGES_MAP[(a, b)]
             perm[i] = pid
             ori[i] = o
+        ori[-1] = (-ori[:-1].sum()) % 2  # 修正最后一个边方向
         return perm, ori
 
     def basic_generators(self):
@@ -357,19 +383,6 @@ class CubeBase:
                 parity ^= (cycle_len - 1) & 1
         return parity
 
-    def heuristic(self, state: np.ndarray):
-        """
-        估价函数：错误块的数量（简单启发）,对 BFS/IDA*/Beam search 可用,小魔方适用
-        return max(
-        self.h_CO(state.corners_ori),
-        self.h_EO(state.edges_ori),
-        self.h_CP(state.corners_perm),
-        self.h_EP(state.edges_perm),
-        ) heuristic(embedding)
-        """
-        errors = np.count_nonzero(state != self.solved)
-        return errors // max(1, self.n)  # 每个错误影响多个面
-
     def dfs(self, state: np.ndarray, depth: int, bound, visited, path, max_depth: int = 25):
         key = self.encode_state(state)
         if key in visited:
@@ -407,6 +420,7 @@ class CubeBase:
         visited.remove(key)
         return best, None
 
+    @class_status('已废弃')
     def heuristic_corner_old(self, state: np.ndarray) -> int:
         '''隐含了三个前提：
         corner 编号是隐式的（靠位置顺序）
@@ -609,7 +623,6 @@ class CubeBase:
         k = (n - 1) / 2
         dr = k - r  # r 向下 → y 减小
         dc = c - k  # c 向右 → x 增大
-
         normal, right, up = cls.face_def[face]
 
         # 世界坐标,normal 是面中心，dc*right + dr*up2 扩展到局部坐标
@@ -741,6 +754,7 @@ class CubeBase:
         return strips
 
     @classmethod
+    @class_status('参考方法')
     def strip_coords_from_axis_old(cls, axis: int, layer: int, n: int) -> list:
         face_normal = cls.face_normal()
         axis_vec = cls.AXIS_VEC[axis]
@@ -1115,6 +1129,7 @@ class CubeBase:
         return (face, r, c) in cls.layer_sticker_set(axis, layer, n)
 
     @classmethod
+    @class_status('待完成')
     def rotated_coord(cls, quad: np.ndarray, axis: int, layer: int, n: int, ang: float):
         """
         返回动画阶段的临时颜色
@@ -1267,6 +1282,7 @@ class StickerCube(CubeBase):
         eid = next(i for i, pair in enumerate(self.edge_face_cycle()) if set(pair) == edge_face)
         return self.edge_coords(self.n)[eid]
 
+    @class_status('参考方法')
     def rotate_face(self, face: str, direction: int = 1):
         """旋转一个面，direction=1顺时针，-1逆时针,axis 与 face.normal 必然平行"""
         fidx = self.face_idx[face]
@@ -1671,6 +1687,9 @@ class StickerCube(CubeBase):
 
 
 if __name__ == "__main__":
+    class_cache.load(StickerCube)
+    class_property.load(StickerCube)
+
     cube = StickerCube(n=5)
     print(cube.face_def())
     print(cube.corner_face_cycle)
@@ -1745,6 +1764,7 @@ if __name__ == "__main__":
         cube.apply(mv)
         # print(cube.cube)
         print(mv)
+        print('diff', cube.diff_coords(cube.cube))
         # print(cube.heuristic(cube.cube))
         inv_moves = cube.invert_moves(mv)
         cube.apply(inv_moves)
@@ -1816,5 +1836,11 @@ if __name__ == "__main__":
         )
 
 
+    # class_cache.save(StickerCube)
+    # class_property.save(StickerCube)
+
     print(cube.get_vars())
     print(cube.strip_coords_from_axis.cache)
+    from rime.base import check_class_status
+
+    print(check_class_status(StickerCube))
