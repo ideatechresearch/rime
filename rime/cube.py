@@ -205,8 +205,11 @@ class CubeBase:
         for i, c in enumerate(corners):
             pid, ref = self.SOLVED_CORNERS_MAP[frozenset(c)]
             perm[i] = pid
-            ori[i] = list(c).index(ref)  # 0/1/2 np.roll(c, -k)
-        ori[-1] = (-ori[:-1].sum()) % 3  # 修正最后一个角方向,把 orientation 投影到合法子空间
+            ori_raw = list(c).index(ref)  # 原始索引：0/1/2
+            ori[i] = (-ori_raw) % 3  # np.roll(c, -k),list(solved[pid]).index(ref)-ori_raw
+
+        # ori = (ori - ori[0]) % 3  # 全局 orientation gauge fix
+        ori[-1] = (-ori[:-1].sum()) % 3  # 把 orientation 投影到合法子空间,修正最后一个角方向
         return perm, ori
 
     def heuristic_corner_perm(self, state: np.ndarray):
@@ -242,7 +245,7 @@ class CubeBase:
         """基础生成元,逻辑层（axis, layer, direction）与几何层解耦,有限邻域 moves（减枝！！）"""
         for axis in range(3):
             for layer in self.center_layers:
-                for direction in (1, -1):  # direction 只用 ±1，2 步可视为两步重复
+                for direction in (-1, 1, 2):  # direction 只用 ±1，2 步可视为两步重复
                     yield axis, layer, direction
 
     def scramble(self, moves: int = 20) -> list:
