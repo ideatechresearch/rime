@@ -722,28 +722,24 @@ class CubieMove:
             edges_ori_delta=edges_ori_delta,
         )
 
-    def to_sticker_perm(self, n: int) -> np.ndarray:
+    def to_sticker_move(self, n: int) -> tuple:
         """
-        把 CubieMove 转换为 perm 供 StickerMove。
-        new_sticker[i] = old_sticker[perm[i]]   （右作用）
+        把 CubieMove 转换为 实际 act 供 StickerMove(生成元在几何空间的表示)。
         """
         mv = next((a for a, m in self.prim_moves.items() if m == self), None)
         assert mv is not None, 'not prim move,composed!'
         axis, side, direction = mv
         layer = side * (n // 2)
-        state_idx = np.arange(6 * n * n, dtype=np.int32).reshape(6, n, n)
-        CubeBase.rotate_core(state_idx, axis, layer, direction)  # rotated，得到 pull-back 映射（new_pos → old_pos）
-        return np.argsort(state_idx.reshape(-1))  # 逆置换的逆 = 正向置换
+        return axis, layer, direction
 
     @classmethod
     def act_moves(cls, state: CubieState, moves: list['CubieMove']) -> tuple['CubieMove', 'CubieState']:
         '''state = M_n ∘ ... ∘ M_2 ∘ M_1 (state)'''
         mv = cls.identity()
-        current = state
         for m in moves:
-            current = m.act(current)
+            # current = m.act(current)
             mv = mv.compose(m)  # 右复合
-        return mv, current  # mv.act(state)
+        return mv, mv.act(state)
 
     @classmethod
     def apply(cls, state: CubieState, moves: list[tuple]) -> CubieState:
@@ -779,6 +775,11 @@ class CubieMove:
                 for direction in (-1, +1, +2):
                     prim_moves[(axis, side, direction)] = cls.from_rotation(axis, side, direction)  # .convert()
         return prim_moves
+
+    @class_cache('STICKER_MOVES', key=lambda n: n)
+    @classmethod
+    def sticker_moves(cls, n: int) -> dict[tuple, 'StickerMove']:
+        return {k: StickerMove.phi(n, m) for k, m in cls.prim_moves.items()}
 
     @class_property('PHASE0_MOVES')
     def phase0_moves(cls) -> dict[tuple, 'Phase0Action']:
@@ -1475,18 +1476,30 @@ class StickerMove:
         arr = s if isinstance(s, np.ndarray) else s.cube  # get_state[self.perm]
         return StickerCube(state=self.act(arr), n=arr.shape[1])
 
-    @staticmethod
-    def act_moves(state: np.ndarray, moves: list[CubieMove]) -> np.ndarray:
+    @classmethod
+    def act_moves(cls, state: np.ndarray, moves: list[tuple]) -> tuple['StickerMove', np.ndarray]:
         '''
-        replay_cubie_moves,CubieMove → StickerMove → replay
+        replay_cubie_moves,CubieMove → StickerMove → compose → act
         state' = state ∘ m1 ∘ m2 ∘ ... ∘ mn
         '''
         n = state.shape[1]
-        flat = state.reshape(-1).copy()
-        for m in moves:
-            perm = m.to_sticker_perm(n)  # 返回正向置换
-            flat = flat[perm]
-        return flat.reshape(6, n, n)
+        sticker_moves = CubieMove.sticker_moves(n=n)
+        sm = cls.identity(n)
+        for k in moves:
+            if k in sticker_moves:
+                sm = sm.compose(sticker_moves[k])
+            else:
+                sm = sm.compose(cls.from_rotation(n, *k))
+        return sm, sm.act(state)
+
+    @classmethod
+    def phi(cls, n: int, m: CubieMove) -> "StickerMove":
+        """
+         把 CubieMove 转换为 perm 供 StickerMove。
+         new_sticker[i] = old_sticker[perm[i]]   （右作用）
+        """
+        mv = m.to_sticker_move(n)
+        return cls.from_rotation(n, *mv)
 
     @classmethod
     def from_rotation(cls, n: int, axis: int, layer: int, direction: int):
@@ -1495,9 +1508,9 @@ class StickerMove:
         perm[i] = j  表示 new_flat[i] = old_flat[j]
         perm[i] = j 表示 i 号贴纸 → j 号位置
         """
-        state_idx = np.arange(6 * n * n, dtype=np.int32).reshape(6, n, n)
+        state_idx = np.arange(6 * n * n, dtype=np.int32).reshape(6, n, n)  # rotated
         CubeBase.rotate_core(state_idx, axis, layer, direction)
-        return cls(perm=state_idx.reshape(-1))  # flatten
+        return cls(perm=state_idx.reshape(-1))  # flatten np.argsort
 
     def center_perm(self, n: int) -> np.ndarray:
         """
@@ -2418,12 +2431,12 @@ if __name__ == "__main__":
 
     m1 = CubieMove.prim_moves[K1]
     m2 = CubieMove.prim_moves[K2]
-    m1_s = m1.to_sticker_perm(cube0.n)
-    m2_s = m2.to_sticker_perm(cube0.n)
-    cube1 = StickerMove(m1_s).replay(cube0)
-    cube2 = StickerMove(m2_s).replay(cube1)
+    m1_s = StickerMove.phi(cube0.n, m1)
+    m2_s = StickerMove.phi(cube0.n, m2)
+    cube1 = m1_s.replay(cube0)
+    cube2 = m2_s.replay(cube1)
 
-    cube3 = StickerMove.act_moves(cube0.get_state(), [m1, m2])
+    _, cube3 = StickerMove.act_moves(cube0.get_state(), [K1, K2])
     assert np.all(cube2.cube == cube3)
     print(cube3)
     cube0.reset()
@@ -2436,8 +2449,8 @@ if __name__ == "__main__":
     cube0.apply(xx)
     print(np.all(cube0.cube == cube3))
 
-    s1 = StickerMove(m2_s).act(StickerMove(m1_s).act(s))
-    s2 = StickerMove(m1_s).compose(StickerMove(m2_s)).act(s)
+    s1 = m2_s.act(m1_s.act(s))
+    s2 = m1_s.compose(m2_s).act(s)
     assert np.all(s1 == s2), f'{s1}\n{s2}'
 
     s_i1 = cube.rotate_state(s_i, 1, 1, 1)
@@ -2787,9 +2800,7 @@ if __name__ == "__main__":
             s0_cu = CubieMove.prim_moves[ma].act(s0_cu)
 
         st11 = cube.idx_to_state(s0_st)
-        st123 = sm.act(cube.solved)
-        if not np.array_equal(st123, st11):
-            print(f"sm {(st123 != st11).sum()}")
+
         s1 = cube.cubie_state(st11)
         # m = CubieMove.build(s0_cu, s1)
         # assert m.act(s0_cu) == s1, f"delta wrong for {m}"
@@ -2801,6 +2812,21 @@ if __name__ == "__main__":
 
         if not np.array_equal(s_cu, st11):
             print(f"cu {(s_cu != st11).sum()}")  # 17
+
+        st123 = sm.act(cube.solved)
+        assert np.array_equal(st123, st11), f"sm {(st123 != st11).sum()}"
+
+        n = cube.solved.shape[1]
+        flat = cube.solved.reshape(-1).copy()
+        for ma in path:
+            m = CubieMove.prim_moves[ma]
+            perm = StickerMove.phi(n, m).perm
+            flat = flat[perm]
+        st124 = flat.reshape(6, n, n)
+
+        assert np.array_equal(st124, st11), f"sm2 {(st124 != st11).sum()}"
+        sm3, st125 = StickerMove.act_moves(cube.solved, path)
+        assert np.array_equal(st125, st11), f"sm3 {(st125 != st11).sum()},{sm3}"
 
         # permutation 必须一致
         assert np.array_equal(s1.corners_perm, s2.corners_perm), f'{s1.corners_perm}, {s2.corners_perm}'
