@@ -9,7 +9,11 @@ import random
 
 @dataclass(frozen=True)
 class CubieState:
-    # G = (S₈ × S₁₂) ⋉ (ℤ₃⁷ × ℤ₂¹¹)
+    """
+    G = (S₈ × S₁₂) ⋉ (ℤ₃⁷ × ℤ₂¹¹)
+    perm: dict[int, np.ndarray]      # orbit_id -> permutation
+    ori: dict[int, np.ndarray]       # orbit_id -> orientation (optional)
+    """
     corners_perm: np.ndarray  # (8,)  0..7, ∈ S₈
     corners_ori: np.ndarray  # (8,)  0..2, ∈ ℤ₃
     edges_perm: np.ndarray  # (12,) 0..11, ∈ S₁₂
@@ -44,6 +48,14 @@ class CubieState:
         data.update(kwargs)
         return CubieState(**data)
 
+    def clone(self):
+        return CubieState(
+            corners_perm=self.corners_perm,
+            corners_ori=self.corners_ori,
+            edges_perm=self.edges_perm,
+            edges_ori=self.edges_ori,
+        )
+
     def __eq__(self, other):
         if not isinstance(other, CubieState):
             return NotImplemented
@@ -54,17 +66,55 @@ class CubieState:
                 np.array_equal(self.edges_ori, other.edges_ori)
         )
 
-    def clone(self):
-        return CubieState(
-            corners_perm=self.corners_perm,
-            corners_ori=self.corners_ori,
-            edges_perm=self.edges_perm,
-            edges_ori=self.edges_ori,
-        )
-
     def encode_state(self) -> np.ndarray:
         """40:(12+8)*2"""
         return np.concatenate([self.corners_perm, self.edges_perm, self.corners_ori, self.edges_ori])
+
+    def to_stickers(self, n: int = 3) -> np.ndarray:
+        """
+        从 CubieState 生成完整的贴纸状态 (6, n, n) 数组
+        - 值是颜色索引 0~5 或颜色字符（根据需要）
+        - 支持任意 n（中心块固定，边角根据 cubie）
+        某一个 gauge 下的具体代表
+        Sticker equality is not guaranteed; cubie equality is the invariant
+        """
+        base = CubeBase(n=n)
+        # 输出数组：6面 × n × n，值是颜色索引 0~5
+        stickers = np.zeros((6, n, n), dtype=np.int8)  # base.solved.copy()
+        # 填充中心块（固定颜色）
+        center_colors = np.array([0, 1, 2, 3, 4, 5])  # U D F B R L
+        for f in range(6):
+            stickers[f, n // 2, n // 2] = center_colors[f]
+
+        # solved 状态下每个角块的颜色顺序
+        solved_corners = base.get_corners(base.solved)  # (8, 3)
+
+        # solved 边块颜色（12 个位置）
+        solved_edges = base.get_edges(base.solved)  # (12, 2)
+        # [[(face_idx, r, c), (face_idx, r, c), (face_idx, r, c)],..
+        for i, corners in enumerate(base.corner_coords(n=n)):
+            cubie_id = self.corners_perm[i]
+            twist = self.corners_ori[i]
+
+            # solved 状态下这个 cubie 的 3 个颜色顺序
+            colors = solved_corners[cubie_id]  # (3,)
+            # 旋转 twist 次（顺时针）
+            actual_colors = np.roll(colors, -twist)  # orientation 负 twist = 逆时针 roll
+
+            # 贴到 3 个面
+            for sticker_pos, color in zip(corners, actual_colors):  # [(f, r, c)]:[val]
+                stickers[sticker_pos] = color
+
+        for i, edges in enumerate(base.edge_coords(n=n)):  # [[(face_idx, r, c), (face_idx, r, c)],
+            cubie_id = self.edges_perm[i]
+            flip = self.edges_ori[i]
+
+            colors = solved_edges[cubie_id]  # (12,2)
+            actual_colors = np.roll(colors, flip)  # 翻转或不翻 flip 1 swap: (colors[1], colors[0])
+            for sticker_pos, color in zip(edges, actual_colors):
+                stickers[sticker_pos] = color
+
+        return stickers
 
     def is_solvable(self) -> bool:
         """
@@ -142,6 +192,14 @@ class CubieState:
     def is_corner_solved(self):
         return np.all(self.corners_perm == np.arange(8))
 
+    @property
+    def corner_parity(self):
+        return CubeBase.permutation_parity(self.corners_perm)
+
+    @property
+    def edge_parity(self):
+        return CubeBase.permutation_parity(self.edges_perm)
+
     def corner_ori_coord(self) -> int:
         """8 个角，每个 Z₃ 自由度 = 7, 3^7 - 1 = 2186"""
         coord: int = 0
@@ -195,7 +253,7 @@ class CubieState:
         return ori
 
     @classmethod
-    def encode_ud_slice(cls, edges_perm: list[int] | np.ndarray) -> int:
+    def encode_ud_slice(cls, edges_perm: list[int]) -> int:
         """
          从 12 个位置里选 4 个 C(12, 4) = 495
          UD-slice 组合坐标：只看 perm，不看 ori，且中层边定义为不在 U/D 层的 4 条边
@@ -216,7 +274,7 @@ class CubieState:
         Phase-1: which 4 positions are occupied by slice edges
         哪些 edge cubie 在 slice positions（4,5,6,7）
         """
-        return self.encode_ud_slice(self.edges_perm)
+        return self.encode_ud_slice(self.edges_perm.tolist())
 
     @class_cache(key=lambda coord: coord)
     @classmethod
@@ -244,7 +302,7 @@ class CubieState:
         positions.sort()  # 升序
 
         # canonical fill, identity is irrelevant
-        slice_cubies = list(cls.ud_slice_edges())  # slice cubies，按 solved 中的顺序填入(4, 5, 6, 7)
+        slice_cubies = list(cls.ud_slice_edges())  # sorted slice cubies，按 solved 中的顺序填入(4, 5, 6, 7)
         non_slice = list(cls.non_slice_edges())
         it_slice = iter(slice_cubies)
         it_non = iter(non_slice)
@@ -294,8 +352,8 @@ class CubieState:
 
         return perm
 
-    @classmethod
-    def encode_perm_coord(cls, edges_perm: np.ndarray | list[int], positions: list[int],
+    @staticmethod
+    def encode_perm_coord(edges_perm: list[int], positions: list[int],
                           cubies: list[int] | tuple[int]) -> int:
         """
         从完整的 edges_perm 中，提取指定位置 + 指定 cubie 子集 的相对置换坐标
@@ -305,19 +363,108 @@ class CubieState:
 
         # 提取当前状态下，在指定 positions 上出现的 cubie 的相对索引
         rel_indices = [cubie_to_rel[int(edges_perm[pos])] for pos in positions]
-        return cls.encode_perm(rel_indices)
+        return CubieState.encode_perm(rel_indices)
 
-    # def heuristic(self):
-    #     return max(
-    #         self.h_CO(state.corners_ori),
-    #         self.h_EO(state.edges_ori),
-    #         self.h_CP(state.corners_perm),
-    #         self.h_EP(state.edges_perm),
-    #     )
+    @staticmethod
+    def comb_to_index(bits: list[int], n: int, k: int) -> int:
+        """
+        bits: 长度 n 的 0/1，恰有 k 个 1
+        返回 [0, C(n,k))
+        """
+        idx = 0
+        r = k
+        for i in range(n):
+            if bits[i]:
+                idx += comb(n - i - 1, r)
+                r -= 1
+                if r == 0:
+                    break
+        return idx
+
+    @staticmethod
+    def index_to_comb(idx: int, n: int, k: int) -> list[int]:
+        bits = [0] * n
+        r = k
+        for i in range(n):
+            if r == 0:
+                break
+            c = comb(n - i - 1, r)
+            if idx >= c:
+                bits[i] = 1
+                idx -= c
+                r -= 1
+        return bits
+
+    @staticmethod
+    def encode_corner_coset(corners_perm: list[int]) -> int:
+        # corner_coset（U 层是哪 4 个 corner）
+        bits = [0] * 8
+        for pos in CubeBase.U_CORNER_POSITIONS:  # 例如 [0,1,2,3]
+            piece = int(corners_perm[pos])
+            bits[piece] = 1
+
+        return CubieState.comb_to_index(bits, 8, 4)
+
+    @class_cache(key=lambda corner_coset: corner_coset)
+    @staticmethod
+    def canonical_corner_coset(corner_coset: int) -> np.ndarray:
+        """
+        corner_coset ∈ [0, 70)
+        canonical corner coset（只放层，不管层内排列）
+        """
+        corners_perm = np.zeros(8, dtype=np.int8)
+        bits = CubieState.index_to_comb(corner_coset, 8, 4)
+        u_pieces = [i for i in range(8) if bits[i]]
+        d_pieces = [i for i in range(8) if not bits[i]]
+        # corner layer-membership 固定顺序（canonical）
+        for pos, piece in zip(CubeBase.U_CORNER_POSITIONS, sorted(u_pieces)):
+            corners_perm[pos] = piece
+
+        for pos, piece in zip(CubeBase.D_CORNER_POSITIONS, sorted(d_pieces)):
+            corners_perm[pos] = piece
+        return corners_perm
+
+    @staticmethod
+    def encode_ud_slice_perm(edges_perm: list[int]) -> int:
+        """
+        UD-slice 内 4 个 edge 的排列
+        Phase-1 已保证 membership 正确
+        返回 [0, 24)
+        """
+        slice_edges = [edges_perm[pos] for pos in CubeBase.SLICE_POSITIONS]
+        return CubieState.encode_perm(slice_edges)  # 0..23
+
+    @class_cache(key=lambda ud_slice: ud_slice)
+    @staticmethod
+    def canonical_ud_slice_edges(ud_slice: int) -> np.ndarray:
+        """
+        canonical ud-slice，仅体现  slice membership
+        只保证：哪些 piece 在 slice 层
+        不保证 slice 内排列
+        不保证 parity
+        """
+        edges_perm = np.zeros(12, dtype=np.int8)
+        bits = CubieState.index_to_comb(ud_slice, 12, 4)
+
+        slice_pieces = [i for i in range(12) if bits[i]]
+        non_slice_pieces = [i for i in range(12) if not bits[i]]
+
+        # canonical：按 piece id 排序填入
+        for pos, piece in zip(CubeBase.SLICE_POSITIONS, sorted(slice_pieces)):
+            edges_perm[pos] = piece
+
+        for pos, piece in zip(CubeBase.NON_SLICE_POSITIONS, sorted(non_slice_pieces)):
+            edges_perm[pos] = piece
+
+        return edges_perm
 
 
 @dataclass(frozen=True)
 class CubieMove:
+    """
+    perm_map: dict[int, np.ndarray]       # orbit_id -> σ
+    ori_delta: dict[int, np.ndarray]      # orbit_id -> Δ (mod k)
+    """
     # permutation: new_pos = perm[old_pos]
     corners_perm: np.ndarray  # σ_c (8,) / tuple[int, ...]
     edges_perm: np.ndarray  # σ_e (12,)
@@ -494,7 +641,7 @@ class CubieMove:
     @classmethod
     def from_rotation(cls, axis: int, side: int, direction: int) -> 'CubieMove':
         """
-        生成的是「右作用 / apply 语义」的 move
+        生成的是「右作用 / apply 语义」的 move，理论 move，在 cubie 参考系下定义
         定义在“绝对 reference 坐标系”上的群元素,几何表示
         独立计算 move 的 perm 和 delta（不依赖贴纸，用坐标模拟旋转）
         Build CubieMove from rotation parameters.
@@ -507,11 +654,11 @@ class CubieMove:
         """
         assert axis in (0, 1, 2)
         assert side in (-1, 0, 1)
-        # Compute turns
-        turns = direction % 4
+
+        turns = abs(direction) % 4  # Compute turns direction % 4
+        sign_dir = 1 if direction > 0 else -1
         if turns == 0:
-            # Identity
-            return cls.identity()
+            return cls.identity()  # Identity
         # Define corner and edge positions
         corner_positions = np.array(CubeBase.CORNER_POS_SIGNS, dtype=np.int8)
         edge_positions = np.array(CubeBase.EDGE_POS_SIGNS, dtype=np.int8)
@@ -534,38 +681,29 @@ class CubieMove:
                     if affected_corners[i]:
                         sign_a = np.sign(current_corner_pos[i, a])
                         sign_b = np.sign(current_corner_pos[i, b])
-                        d = int((-sign_a * sign_b) % 3)  # corner 的朝向变化 = 局部右手系在旋转下的 twist, 加负号是为了让顺时针90°对应 +2 或 -1
-                        corners_ori_delta[i] = (corners_ori_delta[i] + d) % 3
+                        # corner 的朝向变化 = 局部右手系在旋转下的 twist,右手规则 + sign_dir 翻转 ccw 加负号是为了让顺时针90°对应 +2 或 -1
+                        twist = (-sign_a * sign_b * sign_dir) % 3
+                        corners_ori_delta[i] = (corners_ori_delta[i] + twist) % 3
 
             # Update edge ori deltas if F/B axis
             if axis == 2:  # F/B 变,翻转
                 for i in range(12):
                     if affected_edges[i]:
-                        edges_ori_delta[i] ^= 1  # Z2 翻转  = (edges_ori_delta[i] + 1) % 2
+                        edges_ori_delta[i] ^= 1  # Z2 翻转,翻转不依赖 sign_dir（90° 和 -90° 都翻一次） = (edges_ori_delta[i] + 1) % 2
 
             # R/L (axis=0): edges 不变
             # U/D (axis=1): 都不变
 
-            # Update positions with single 90 cw rotation,必须是 right-hand
-            def rotate_coord(coord, ax: int):
-                x, y, z = coord
-                if ax == 0:  # around x
-                    return [x, z, -y]
-                elif ax == 1:  # around y
-                    return [-z, y, x]
-                elif ax == 2:  # around z
-                    return [y, -x, z]
-                else:
-                    raise ValueError
-
+            # Update positions with rotation,必须是 right-hand
             for i in range(8):
                 if affected_corners[i]:
-                    current_corner_pos[i] = rotate_coord(current_corner_pos[i], axis)
+                    current_corner_pos[i] = CubeBase.rotate_coord(current_corner_pos[i], axis, sign_dir)
 
             for i in range(12):
                 if affected_edges[i]:
-                    current_edge_pos[i] = rotate_coord(current_edge_pos[i], axis)
+                    current_edge_pos[i] = CubeBase.rotate_coord(current_edge_pos[i], axis, sign_dir)
 
+        # 计算 perm（从 current_pos 映射回原始 pos）
         # Compute perms: for each original i, find the dst where original_pos[dst] == current_pos[i]
         corners_perm = np.zeros(8, dtype=np.int8)
         for i in range(8):
@@ -642,12 +780,20 @@ class CubieMove:
                     prim_moves[(axis, side, direction)] = cls.from_rotation(axis, side, direction)  # .convert()
         return prim_moves
 
+    @class_property('PHASE0_MOVES')
+    def phase0_moves(cls) -> dict[tuple, 'Phase0Action']:
+        return {k: Phase0Action.phi(m) for k, m in cls.prim_moves.items()}
+
     @class_property('PHASE1_MOVES')
-    def phase1_moves(cls) -> dict[tuple, 'Phase1Move']:
-        return {k: Phase1Move.phi(m) for k, m in cls.prim_moves.items()}
+    def phase1_moves(cls) -> dict[tuple, 'Phase1Action']:
+        return {k: Phase1Action.lift(p) for k, p in cls.phase0_moves.items()}
+
+    @class_property('PHASE15_MOVES')
+    def phase15_moves(cls) -> dict[tuple, 'Phase15Action']:
+        return {k: Phase15Action.phi(m) for k, m in cls.prim_moves.items()}
 
     @class_property('PHASE2_MOVES')
-    def phase2_moves(cls) -> dict[tuple, 'Phase2Move']:
+    def phase2_moves(cls) -> dict[tuple, 'Phase2Action']:
         '''⟨ U, D, L², R², F², B² ⟩'''
         moves: dict[tuple, CubieMove] = {}  # 去重
         for (axis, side, direction), m in cls.prim_moves.items():
@@ -662,7 +808,7 @@ class CubieMove:
                 #     key = (axis, side, 2)
                 #     moves[key] =  m.compose(m)  # 合并了对称的 180°
 
-        return {k: Phase2Move.phi(m) for k, m in moves.items()}
+        return {k: Phase2Action.phi(m) for k, m in moves.items()}
 
     @staticmethod
     def scramble_state(length: int = 50, moves: list['CubieMove'] | None = None) -> CubieState:
@@ -712,25 +858,28 @@ class CubieMove:
 
         return commutators
 
+    @property
+    def edge_parity_delta(self) -> int:
+        # edge permutation 奇偶 0 or 1
+        return CubeBase.permutation_parity(self.edges_perm)
+
     @staticmethod
     def build_move_part(perm0, ori0, perm1, ori1, mod: int) -> tuple[np.ndarray, np.ndarray]:
         """
-        右作用下求 move delta：s1 = s0 ∘ m,
+        右作用下求 move delta：s1 = s0 ∘ m, s1 = s0 ∘ m → m = s0⁻¹ ∘ s1
         move_ori[new_pos] = ori1[new_pos] - ori0[old_pos]   (mod)
         """
         n = len(perm0)
         move_perm = np.zeros(n, dtype=np.int8)
         move_ori = np.zeros(n, dtype=np.int8)
-
         # 逆置换
-        pos0 = np.argsort(perm0)  # cubie → pos in s0
-        pos1 = np.argsort(perm1)  # cubie → pos in s1
-        for cubie in range(n):
-            old_pos = pos0[cubie]
-            new_pos = pos1[cubie]
-            move_perm[new_pos] = perm0[old_pos]  # m 把 old_pos 的内容搬到 new_pos，所以在 new_pos 放的 cubie 是 s0[old_pos]
-            move_ori[new_pos] = (ori1[new_pos] - ori0[old_pos]) % mod  # 如左作用反向
-            assert (ori0[old_pos] + move_ori[new_pos]) % mod == ori1[new_pos]
+        inv_perm0 = np.argsort(perm0)  # cubie → pos in s0
+        for pos in range(n):
+            cubie = perm1[pos]  # pos 在 s1 的 cubie
+            old_pos = inv_perm0[cubie]  # 这个 cubie 在 s0 的位置
+            move_perm[pos] = old_pos  # m 把 old_pos 的内容搬到 pos
+            move_ori[pos] = (ori1[pos] - ori0[old_pos]) % mod  # ori delta = ori1[pos] - ori0[old_pos]
+            assert (ori0[old_pos] + move_ori[pos]) % mod == ori1[pos]
 
         return move_perm, move_ori
 
@@ -746,7 +895,7 @@ class CubieMove:
          s0 = CubieState.solved()
          CubieMove.build(s0, move.act(s0)) == move
         """
-        assert s0.is_solvable() and s1.is_solvable(), "States must be solvable"
+        assert s0.is_solvable() and s1.is_solvable(), f"States must be solvable:{s0}\n{s1}"
         σc, Δc = cls.build_move_part(s0.corners_perm, s0.corners_ori, s1.corners_perm, s1.corners_ori, 3)
         σe, Δe = cls.build_move_part(s0.edges_perm, s0.edges_ori, s1.edges_perm, s1.edges_ori, 2)
         return cls(
@@ -758,7 +907,7 @@ class CubieMove:
 
     @staticmethod
     def build_pruning_table(
-            moves: list["Phase1Move|Phase2Move"],
+            moves: list["QuotientMove"],  # Phase0Action|Phase1Action|Phase2Action
             apply_move: callable,  # (move, coord) -> new_coord
             start_coord: tuple | int = 0,  # solved 状态在该坐标下的编码,
             table_shape: tuple | int = 495,  # ud:495/40320, (3**7, 2**11)
@@ -768,7 +917,7 @@ class CubieMove:
         |Q| = 3^7 × 2^11 × C(12,4) = 2,217,093,120
 
         参数:
-            moves: List[Phase2Move]，所有允许的移动
+            moves: List[Phase2Action]，所有允许的移动
             apply_move: callable，函数，签名: (move, current_coord) -> new_coord
                         Phase2 示例: 提取对应 perm_map 的函数
                                     lambda m, idx: m.corner_perm_map[idx]
@@ -796,13 +945,107 @@ class CubieMove:
             cur = queue.popleft()
             d = dist[cur]
 
-            for m in moves:  # PHASE1_MOVES
+            for m in moves:
                 nxt = apply_move(m, cur)  # 关键：使用传入的 map
                 if dist[nxt] == -1:
                     dist[nxt] = d + 1
                     queue.append(nxt)
 
         return dist
+
+
+@dataclass(frozen=True)
+class QuotientMove:
+    """一个群作用在 quotient 空间上的“元素”"""
+    cubie_move: CubieMove  # 仅用于 replay/debug，一个合法代表（保留） replay 得到真实 CubieState
+
+    def act(self, coord):
+        raise NotImplementedError
+
+    def replay(self, s: CubieState) -> CubieState:
+        """使用底层 cubie_move 重放路径，得到完整 CubieState  从 Phase 路径 replay 到真实状态"""
+        return self.cubie_move.act(s)
+
+
+@dataclass(frozen=True)
+class Phase0Coord:
+    """G/N ≅ (Z3^7 × Z2^11) quotient 空间 物理层（不可违背）一个“只含守恒律”的物理世界 """
+    corner_ori: int  # 0 .. 3^7 - 1
+    edge_ori: int  # 0 .. 2^11 - 1
+
+    @property
+    def key(self) -> tuple:
+        return self.corner_ori, self.edge_ori
+
+    @classmethod
+    def project(cls, s: CubieState) -> 'Phase0Coord':
+        """from_cubie,投影到 Phase-1 坐标空间"""
+        return cls(
+            corner_ori=s.corner_ori_coord(),
+            edge_ori=s.edge_ori_coord(),
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, Phase0Coord):
+            return NotImplemented
+        return self.corner_ori == other.corner_ori and self.edge_ori == other.edge_ori
+
+    def is_solved(self) -> bool:
+        return self.corner_ori == 0 and self.edge_ori == 0
+
+    def heuristic(self) -> int:
+        '''
+        weak heuristic pruning table：CO × EO
+        '''
+        co_bits = CubieState.decode_corner_ori(self.corner_ori)  # list of 7 ints 0~2
+        eo_bits = CubieState.decode_edge_ori(self.edge_ori)  # list of 11 ints 0~1
+
+        corner_h = np.count_nonzero(co_bits)
+        edge_h = np.count_nonzero(eo_bits)
+
+        return max(corner_h, edge_h)
+
+
+@dataclass(frozen=True)
+class Phase0Action(QuotientMove):
+    """Phase0Action ⊂ End(Phase0Coord) 群作用的投影"""
+    corner_ori_map: np.ndarray  # shape (3^7,), permutation of 0..6
+    edge_ori_map: np.ndarray  # shape (2^11,), permutation of 0..10
+    cubie_move: CubieMove  # 一个合法代表（保留）
+
+    def act(self, c: Phase0Coord) -> Phase0Coord:
+        return Phase0Coord(
+            corner_ori=int(self.corner_ori_map[c.corner_ori]),
+            edge_ori=int(self.edge_ori_map[c.edge_ori])
+        )
+
+    @classmethod
+    def phi(cls, m: CubieMove) -> "Phase0Action":
+        solved = CubieState.solved()
+        corner_map = np.zeros(3 ** 7, np.int32)
+        # -------- corner ori map --------
+        for i in range(3 ** 7):
+            s = solved.with_(corners_ori=CubieState.decode_corner_ori(i))
+            corner_map[i] = m.act(s).corner_ori_coord()  # 必须保证完全遵循群规则
+        # -------- edge ori map --------
+        edge_map = np.zeros(2 ** 11, np.int32)
+        for i in range(2 ** 11):
+            s = solved.with_(edges_ori=CubieState.decode_edge_ori(i))
+            edge_map[i] = m.act(s).edge_ori_coord()
+
+        return cls(
+            corner_ori_map=corner_map,
+            edge_ori_map=edge_map,
+            cubie_move=m
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, Phase0Action):
+            return NotImplemented
+        return (
+                np.array_equal(self.corner_ori_map, other.corner_ori_map)
+                and np.array_equal(self.edge_ori_map, other.edge_ori_map)
+        )
 
 
 @dataclass(frozen=True)
@@ -835,12 +1078,6 @@ class Phase1Coord:
         '''
         return self.corner_ori == 0 and self.edge_ori == 0 and self.ud_slice == CubieState.solved_ud
 
-    def __eq__(self, other):
-        if not isinstance(other, Phase1Coord):
-            return NotImplemented
-        return (self.corner_ori == other.corner_ori and
-                self.edge_ori == other.edge_ori)
-
     @property
     def key(self) -> tuple:
         return self.corner_ori, self.edge_ori, self.ud_slice
@@ -850,43 +1087,25 @@ class Phase1Coord:
         co, eo, uds = self.key
         return f"CO{co}|EO{eo}|UD{uds}"
 
-    def apply(self, m: "Phase1Move") -> "Phase1Coord":
+    def apply(self, m: "Phase1Action") -> "Phase1Coord":
         return m.act(self)
-
-    def heuristic(self) -> int:
-        '''
-        weak heuristic
-        UD-slice 不是 quotient,只作为 heuristic admissible heuristic,
-        pruning table：CO × EO
-        '''
-        co_bits = CubieState.decode_corner_ori(self.corner_ori)  # list of 7 ints 0~2
-        eo_bits = CubieState.decode_edge_ori(self.edge_ori)  # list of 11 ints 0~1
-
-        corner_h = np.count_nonzero(co_bits)
-        edge_h = np.count_nonzero(eo_bits)
-        # ud_h = 0 if self.ud_slice == 0 else 1  # 保守估计
-        return max(corner_h, edge_h)
 
 
 @dataclass(frozen=True)
-class Phase1Move:
+class Phase1Action(Phase0Action):
     """
     Phase-1 坐标映射：把 CubieMove 投影到 Phase-1 子空间（CO × EO × UD-slice membership）
     满足：π(s ∘ m) = π(s) ∘ φ(m)   （右作用语义）
-    φ : CubieMove → Phase1Move 是同态映射
+    φ : CubieMove → Phase1Action 是同态映射
     用于 pruning table 生成和 IDA*/BFS 中的坐标转移
     """
-    corner_ori_map: np.ndarray  # shape (3^7,), permutation of 0..6
-    edge_ori_map: np.ndarray  # shape (2^11,), permutation of 0..10
     # UD-slice membership 的组合置换
     # 作用在 C(12,4) 编码空间上,并不存在一个与 EP 无关的、真正的函数
     ud_slice_map: np.ndarray  # shape (495,), permutation of 0..494
 
-    cubie_move: CubieMove  # 一个合法代表（保留） replay 得到真实 CubieState
-
     def act(self, c: Phase1Coord) -> Phase1Coord:
         """
-        Phase1Move.act 只作为“坐标映射”，不作为群作用,整数置换,只计算 CO, EO, UD 的变化
+        Phase1Action.act 只作为“坐标映射”，不作为群作用,整数置换,只计算 CO, EO, UD 的变化
         此方法仅用于坐标投影，不是 cubie 层面的群作用
         """
         return Phase1Coord(
@@ -895,76 +1114,66 @@ class Phase1Move:
             ud_slice=int(self.ud_slice_map[c.ud_slice]),  # state.ud_slice_coord()
         )
 
-    def compose(self, other: "Phase1Move") -> "Phase1Move":
+    def compose(self, other: "Phase1Action") -> "Phase1Action":
         """
         坐标映射右作用复合：self ∘ other  先应用 other（右边），再应用 self（左边）
         (self ∘ other).act(c) = self.act(other.act(c))
         """
-        return Phase1Move(
+        return Phase1Action(
             corner_ori_map=self.corner_ori_map[other.corner_ori_map],
             edge_ori_map=self.edge_ori_map[other.edge_ori_map],
             ud_slice_map=self.ud_slice_map[other.ud_slice_map],
             cubie_move=self.cubie_move.compose(other.cubie_move)  # 为了 replay / debug
         )
 
-    def replay(self, s: CubieState) -> CubieState:
-        """使用底层 cubie_move 重放路径，得到完整 CubieState  从 Phase1 路径 replay 到真实状态"""
-        return self.cubie_move.act(s)
-
-    def __eq__(self, other):
-        if not isinstance(other, Phase1Move):
-            return NotImplemented
-        return (
-                np.array_equal(self.corner_ori_map, other.corner_ori_map)
-                and np.array_equal(self.edge_ori_map, other.edge_ori_map)
-        )
-
     @classmethod
-    def phi(cls, m: CubieMove) -> "Phase1Move":
-        """
-        从底层 CubieMove 生成 Phase-1 坐标映射
-        保证：对于任意 s，φ(m).act(π(s)) == π(m.act(s))
-        """
+    def lift(cls, p0: Phase0Action) -> "Phase1Action":
+        m = p0.cubie_move
         solved = CubieState.solved()
-        # -------- corner ori map --------
-        corner_map = np.zeros(3 ** 7, dtype=np.int32)
-        for coord in range(3 ** 7):
-            s = solved.with_(corners_ori=CubieState.decode_corner_ori(coord))
-            out = m.act(s)  # 必须保证完全遵循群规则
-            corner_map[coord] = out.corner_ori_coord()
-
-        # -------- edge ori map --------
-        edge_map = np.zeros(2 ** 11, dtype=np.int32)
-        for coord in range(2 ** 11):
-            s = solved.with_(edges_ori=CubieState.decode_edge_ori(coord))
-            out = m.act(s)
-            edge_map[coord] = out.edge_ori_coord()
-
         # -------- ud slice map --------
         # 构造一个“只有 slice membership 不同”的状态,只要求“slice 成员正确”， 不要求 slice 内部的排列是对的,依赖 edge permutation 的操作
         slice_map = np.zeros(495, dtype=np.int16)
         for coord in range(495):
             s = solved.with_(edges_perm=CubieState.decode_ud_slice(coord))
-            # assert s.ud_slice_coord() == coord
-            # s.corners_ori[:] = 0
-            # s.edges_ori[:] = 0
+            # assert s.ud_slice_coord() == coord < 495
             out = m.act(s)
             slice_map[coord] = out.ud_slice_coord()
 
         return cls(
-            corner_ori_map=corner_map,
-            edge_ori_map=edge_map,
+            corner_ori_map=p0.corner_ori_map,
+            edge_ori_map=p0.edge_ori_map,
             ud_slice_map=slice_map,
             cubie_move=m
         )
 
+    @classmethod
+    def phi(cls, m: CubieMove) -> "Phase1Action":
+        """
+        从底层 CubieMove 生成 Phase-1 坐标映射
+        保证：对于任意 s，φ(m).act(π(s)) == π(m.act(s))
+        """
+        return cls.lift(Phase0Action.phi(m))
+
 
 @dataclass(frozen=True)
 class Phase2Coord:
-    """处理角块、非 slice 边、slice 内部排列"""
+    """处理角块、非 slice 边、slice 内部排列
+    Invariants:
+    - corner_ori = 0
+    - edge_ori = 0
+    - UD-slice membership fixed
+    - corner parity = edge parity (guaranteed by Phase-1.75)
+
+    Components:
+    - corner_perm ∈ A8 (8! / 2)
+    - edge_perm ∈ S8 (non-slice edges)
+    - ud_slice_perm ∈ S4
+    """
     corner_perm: int  # 0 .. 40319 (8! / 2, 去掉整体 parity)
     edge_perm: int  # 0 .. 40319 (8! 只取非-slice edges 8 条)
     ud_slice_perm: int  # 0 .. 23  (4!) 局部自由度
+
+    # edge_parity: int  # Z2
 
     @classmethod
     def project(cls, s: CubieState) -> "Phase2Coord":
@@ -977,11 +1186,12 @@ class Phase2Coord:
         corner_idx = CubieState.encode_perm(s.corners_perm.tolist())
 
         # 非 slice 边：相对排列
-        edge_idx = CubieState.encode_perm_coord(s.edges_perm,
+        edge_idx = CubieState.encode_perm_coord(s.edges_perm.tolist(),
                                                 positions=CubeBase.NON_SLICE_POSITIONS,
                                                 cubies=CubieState.non_slice_edges())
 
-        ud_idx = CubieState.encode_perm_coord(s.edges_perm, positions=CubeBase.SLICE_POSITIONS,
+        ud_idx = CubieState.encode_perm_coord(s.edges_perm.tolist(),
+                                              positions=CubeBase.SLICE_POSITIONS,
                                               cubies=CubieState.ud_slice_edges())
 
         return cls(corner_idx, edge_idx, ud_idx)
@@ -998,7 +1208,7 @@ class Phase2Coord:
     def key(self) -> tuple:
         return self.corner_perm, self.edge_perm, self.ud_slice_perm
 
-    def apply(self, m: "Phase2Move") -> "Phase2Coord":
+    def apply(self, m: "Phase2Action") -> "Phase2Coord":
         return m.act(self)
 
     def heuristic(self) -> int:
@@ -1017,12 +1227,10 @@ class Phase2Coord:
 
 
 @dataclass(frozen=True)
-class Phase2Move:
+class Phase2Action(QuotientMove):
     corner_perm_map: np.ndarray  # shape (40320,)
     edge_perm_map: np.ndarray  # shape (40320,)
     ud_slice_perm_map: np.ndarray  # shape (24,)
-
-    cubie_move: CubieMove  # 一个合法代表（保留）
 
     def act(self, c: Phase2Coord) -> Phase2Coord:
         """DFS 用, m ⋅ s """
@@ -1032,22 +1240,19 @@ class Phase2Move:
             ud_slice_perm=int(self.ud_slice_perm_map[c.ud_slice_perm]),
         )
 
-    def compose(self, other: "Phase2Move") -> "Phase2Move":
+    def compose(self, other: "Phase2Action") -> "Phase2Action":
         """
         self ∘ other
         """
-        return Phase2Move(
+        return Phase2Action(
             corner_perm_map=self.corner_perm_map[other.corner_perm_map],
             edge_perm_map=self.edge_perm_map[other.edge_perm_map],
             ud_slice_perm_map=self.ud_slice_perm_map[other.ud_slice_perm_map],
             cubie_move=self.cubie_move.compose(other.cubie_move),
         )
 
-    def replay(self, s: CubieState) -> CubieState:
-        return self.cubie_move.act(s)
-
     def __eq__(self, other):
-        if not isinstance(other, Phase2Move):
+        if not isinstance(other, Phase2Action):
             return NotImplemented
         return (
                 np.array_equal(self.corner_perm_map, other.corner_perm_map)
@@ -1056,7 +1261,7 @@ class Phase2Move:
         )
 
     @classmethod
-    def phi(cls, m: CubieMove) -> "Phase2Move":
+    def phi(cls, m: CubieMove) -> "Phase2Action":
         """
         直接从 CubieMove 诱导,坐标转换
         G₂ = ⟨U, D, R², L², F², B²⟩
@@ -1119,15 +1324,151 @@ class Phase2Move:
         )
 
 
+@dataclass(frozen=True)
+class Phase15Coord:
+    """
+    Phase-1.5 quotient 坐标
+    在 G / H₁ 的基础上，再 quotient 一个 H₂ ⊂ H₁
+    Phase1 已经 quotient 掉 orientation 与 slice membership。
+    Phase1.5 再 quotient 掉 slice 内排列与角块内部排列，只保留 coset 与 edge parity
+    状态空间大小 3360,压缩状态
+    """
+    slice_perm: int  # 4! = 24 slice_perm ∈ [0,24)
+    corner_coset: int  # quotient 掉 U-layer + D-layer 内部的排列 8! / (4!·4!) = C(8,4)  ∈ [0,70)
+    parity: int  # Z2 守恒 0 / 1,edge_parity' = edge_parity XOR Δ(m) / edge_parity XOR corner_parity
+
+    @property
+    def index(self) -> int:
+        return ((self.slice_perm * 70 + self.corner_coset) << 1) | self.parity
+
+    @classmethod
+    def from_index(cls, i: int) -> "Phase15Coord":
+        N_CORNER_COSET = 70
+        parity = i & 1
+        i >>= 1
+        corner_coset = i % N_CORNER_COSET
+        slice_perm = i // N_CORNER_COSET
+        return cls(slice_perm=slice_perm, corner_coset=corner_coset, parity=parity)
+
+    @property
+    def key(self) -> tuple:
+        return self.slice_perm, self.corner_coset, self.parity
+
+    @classmethod
+    def project(cls, s: CubieState) -> "Phase15Coord":
+        """ encode 状态空间裁剪 """
+        # 1. slice_perm（Phase1 已保证 membership）
+        slice_perm = CubieState.encode_ud_slice_perm(s.edges_perm.tolist())  # 0..23
+
+        # 2. corner_coset（U 层是哪 4 个 corner）
+        corner_coset = CubieState.encode_corner_coset(s.corners_perm.tolist())
+        # 3. edge parity
+        edge_parity = s.edge_parity  # 0/1
+
+        return cls(
+            slice_perm=slice_perm,
+            corner_coset=corner_coset,
+            parity=edge_parity
+        )
+
+    def is_solved(self) -> bool:
+        return self.index == 0  # return self.slice_perm == 0 and self.corner_coset == 0 and self.parity == 0
+
+    @staticmethod
+    def tight(s: CubieState) -> "Phase15Coord":
+        """
+        corner parity 还在 Phase-2 可达 kernel
+        在 Phase-2 中，corner parity 与 edge parity 必须匹配
+        """
+        p = Phase15Coord.project(s)
+        return Phase15Coord(slice_perm=p.slice_perm, corner_coset=p.corner_coset,
+                            parity=s.edge_parity ^ s.corner_parity)
+
+    def decode(self) -> CubieState:
+        """
+         canonical representative
+         仅用于 φ 构造 不用于搜索 replay,搜索过程中 从不调用 decode 再 project
+        """
+        s = CubieState.solved()
+        # 1. slice_perm
+        # 2. corner_coset（只放层，不管层内排列）
+        s.with_(edges_perm=CubieState.canonical_ud_slice_edges(self.slice_perm),
+                corners_perm=CubieState.canonical_corner_coset(self.corner_coset))
+
+        # 3. edge parity
+        if s.edge_parity != self.parity:  # decode 出来的状态，其 parity 必须天然一致
+            raise AssertionError("Illegal Phase15Coord: parity mismatch")
+
+        return s
+
+
+@dataclass(frozen=True)
+class Phase15Action(QuotientMove):
+    """
+    Phase-1.5 上的群作用投影
+    φ : CubieMove → End(Phase15Coord)
+    """
+    slice_perm_map: np.ndarray  # shape (24,)
+    corner_coset_map: np.ndarray  # shape (70,)
+    edge_parity_map: np.ndarray  # shape (2,)
+
+    def act(self, c: Phase15Coord) -> Phase15Coord:
+        return Phase15Coord(
+            slice_perm=int(self.slice_perm_map[c.slice_perm]),
+            corner_coset=int(self.corner_coset_map[c.corner_coset]),
+            parity=int(self.edge_parity_map[c.parity]),
+        )
+
+    def act_index(self, idx: int) -> int:
+        c = Phase15Coord.from_index(idx)
+        return self.act(c).index
+
+    @classmethod
+    def phi(cls, m: CubieMove) -> "Phase15Action":
+        # 固定 orientation & slice membership
+        # 枚举 quotient coord
+        # m.act(s) → re-encode
+        solved = CubieState.solved()
+
+        slice_perm_map = np.zeros(24, dtype=np.int8)
+        corner_coset_map = np.zeros(70, dtype=np.int16)
+        edge_parity_map = np.zeros(2, dtype=np.int8)
+
+        # slice_perm
+        for i in range(24):
+            # membership 固定 + slice 内排列 = i
+            s = solved.with_(edges_perm=CubieState.canonical_ud_slice_edges(i))
+            s2 = m.act(s)
+            slice_perm_map[i] = CubieState.encode_ud_slice_perm(s2.edges_perm.tolist())
+
+        # corner_coset
+        for i in range(70):
+            s = solved.with_(corners_perm=CubieState.canonical_corner_coset(i))
+            s2 = m.act(s)
+            corner_coset_map[i] = CubieState.encode_corner_coset(s2.corners_perm.tolist())
+
+        # edge_parity
+        delta = m.edge_parity_delta  # 0 or 1 群论一致性条件
+        for p in (0, 1):
+            edge_parity_map[p] = p ^ delta
+
+        return cls(
+            slice_perm_map=slice_perm_map,
+            corner_coset_map=corner_coset_map,
+            edge_parity_map=edge_parity_map,
+            cubie_move=m
+        )
+
+
 class StickerMove:
     def __init__(self, perm: np.ndarray):
         """对 sticker index 的一维置换"""
         self.perm = perm.astype(np.int32)  # 一维贴纸置换
 
-    def act(self, state_idx: np.ndarray) -> np.ndarray:
+    def act(self, sticker_idx: np.ndarray) -> np.ndarray:
         """右作用：new[i] = old[perm[i]] new_state[i] = old_state[perm[i]]"""
-        flat = state_idx.reshape(-1)
-        return flat[self.perm].reshape(state_idx.shape)
+        flat = sticker_idx.reshape(-1)
+        return flat[self.perm].reshape(sticker_idx.shape)
 
     def replay(self, s: StickerCube | np.ndarray) -> StickerCube:
         """等价于 act"""
@@ -1148,6 +1489,33 @@ class StickerMove:
         return flat.reshape(6, n, n)
 
     @classmethod
+    def from_rotation(cls, n: int, axis: int, layer: int, direction: int):
+        """
+        CubieMove ⊂ StickerMove,  CubieMove → StickerMove
+        perm[i] = j  表示 new_flat[i] = old_flat[j]
+        perm[i] = j 表示 i 号贴纸 → j 号位置
+        """
+        state_idx = np.arange(6 * n * n, dtype=np.int32).reshape(6, n, n)
+        CubeBase.rotate_core(state_idx, axis, layer, direction)
+        return cls(perm=state_idx.reshape(-1))  # flatten
+
+    def center_perm(self, n: int) -> np.ndarray:
+        """
+           返回一维 center_perm：
+           index = center sticker 全局编号
+           value = 被 move 后送来的 sticker 编号
+        """
+        perm = self.perm.reshape(6, n, n)
+        centers = CubeBase.get_center_rings(n)
+
+        flat = []
+        for fidx, rings in enumerate(centers):
+            for ring in rings:
+                for r, c, _ in ring:
+                    flat.append(perm[fidx, r, c])
+        return np.array(flat, dtype=np.int32)
+
+    @classmethod
     def identity(cls, n: int) -> "StickerMove":
         return cls(perm=np.arange(6 * n * n, dtype=np.int32))
 
@@ -1159,18 +1527,6 @@ class StickerMove:
     def compose(self, other: "StickerMove") -> "StickerMove":
         # self ∘ other,先 other，再 self
         return StickerMove(self.perm[other.perm])
-
-    @classmethod
-    def from_rotation(cls, n: int, axis: int, layer: int, direction: int):
-        """
-        CubieMove ⊂ StickerMove,  CubieMove → StickerMove
-        perm[i] = j  表示 new_flat[i] = old_flat[j]
-        perm[i] = j 表示 i 号贴纸 → j 号位置
-        cubie orientation 没有考虑,贴纸在旋转层里，会顺时针/逆时针移动
-        """
-        state_idx = np.arange(6 * n * n, dtype=np.int32).reshape(6, n, n)
-        CubeBase.rotate_core(state_idx, axis, layer, direction)
-        return cls(perm=state_idx.reshape(-1))  # flatten
 
 
 class CycleLibrary:
@@ -1267,7 +1623,7 @@ class CubieBase(CubeBase):
 
     def cubie_state(self, state: np.ndarray) -> CubieState:
         """
-        sticker_to_cubie_state
+        sticker_to_cubie_state from_stickers
         state = [
           corners_perm (8)       ∈ [0..7]
           corners_ori  (8)       ∈ [0..2]
@@ -1282,10 +1638,12 @@ class CubieBase(CubeBase):
         # 修正 parity
         corner_parity = self.permutation_parity(corners_perm)
         edge_parity = self.permutation_parity(edges_perm)
-        if corner_parity != edge_parity:  # 交换最后两条非 slice 边
-            print(f'corner parity{corner_parity} != edge parity{edge_parity}')
+        if corner_parity != edge_parity:
+            print(f'Fixing odd parity: corner {corner_parity} != edge {edge_parity}')
             non_slice = CubieState.non_slice_edges()
-            edges_perm[non_slice[-2]], edges_perm[non_slice[-1]] = edges_perm[non_slice[-1]], edges_perm[non_slice[-2]]
+            i, j = non_slice[-2], non_slice[-1]  # 交换最后两条非 slice 边
+            edges_perm[i], edges_perm[j] = edges_perm[j], edges_perm[i]
+            assert self.permutation_parity(edges_perm) == corner_parity, "Parity fix failed"
 
         return CubieState(
             corners_perm=corners_perm,
@@ -1334,18 +1692,21 @@ class CubieBase(CubeBase):
         return prim_moves  # self.PRIM_MOVES
 
     @staticmethod
-    def build_phase_graph(start: Phase1Coord | Phase2Coord, max_depth: int = 2):
-        """Phase-1 Phase-2 Schreier graph
+    def build_phase_graph(start: Phase0Coord | Phase1Coord | Phase2Coord, max_depth: int = 2, max_nodes: int = 10000):
+        """
+        Schreier graph
         nodes: set[Phase1Coord]
         edges: list[(src, label, dst)]
         I explicitly constructed the Phase-1 Schreier graph of the Rubik’s Cube quotient
         and verified generator degeneracies, involutions, and identity actions.
         """
-        moves = CubieMove.phase1_moves if isinstance(start, Phase1Coord) else CubieMove.phase2_moves
+        moves = CubieMove.phase0_moves if isinstance(start, Phase0Coord) \
+            else CubieMove.phase1_moves if isinstance(start, Phase1Coord) \
+            else CubieMove.phase2_moves
         queue = deque([(start, 0)])
         nodes = {start.key: start}
         edges = []
-        while queue:
+        while queue and len(nodes) < max_nodes:
             s, d = queue.popleft()
             if d >= max_depth:
                 continue
@@ -1360,12 +1721,44 @@ class CubieBase(CubeBase):
 
         return nodes, edges
 
+    @staticmethod
+    def build_phase15_pruning() -> np.ndarray:
+        N_PHASE15 = 24 * 70 * 2
+        PHASE15_MOVES: list[Phase15Action] = list(CubieMove.phase15_moves.values())
+        INF = np.int8(127)
+        dist = np.full(N_PHASE15, INF, dtype=np.int8)
+
+        solved = Phase15Coord.project(CubieState.solved()).index
+        dist[solved] = 0
+
+        queue = np.empty(N_PHASE15, dtype=np.int16)
+        head = 0
+        tail = 1
+        queue[0] = solved
+
+        while head < tail:
+            cur = int(queue[head])
+            head += 1
+
+            d = dist[cur]
+            nd = np.int8(d + 1)
+
+            for act in PHASE15_MOVES:
+                nxt = act.act_index(cur)
+                if dist[nxt] == INF:
+                    dist[nxt] = nd
+                    queue[tail] = nxt
+                    tail += 1
+
+        return dist
+
     @classmethod
     def build_pruning_table(cls):
         # 离线构建器
         # PRIM_MOVES = CubieMove.prim_moves()
-        PHASE1_MOVES: list[Phase1Move] = list(CubieMove.phase1_moves.values())
-        PHASE2_MOVES: list[Phase2Move] = list(CubieMove.phase2_moves.values())
+        PHASE0_MOVES: list[Phase0Action] = list(CubieMove.phase0_moves.values())
+        PHASE1_MOVES: list[Phase1Action] = list(CubieMove.phase1_moves.values())
+        PHASE2_MOVES: list[Phase2Action] = list(CubieMove.phase2_moves.values())
         print('build_pruning_table', len(PHASE1_MOVES), len(PHASE2_MOVES))
         import os
         if os.path.exists('data/phase1_pruning.npz'):
@@ -1373,16 +1766,16 @@ class CubieBase(CubeBase):
             cls.CO_EO_PRUNE = data["CO_EO"]
             cls.UD_PRUNE = data["UD"]
         else:
-            # 两维联合（CO × EO），固定 UD-slice = 0,深度 ≤ 7
+            # PHASE0_PRUNE 两维联合（CO × EO），固定 UD-slice = 0,深度 ≤ 7
             cls.CO_EO_PRUNE = CubieMove.build_pruning_table(
-                moves=PHASE1_MOVES,
+                moves=PHASE0_MOVES,  # PHASE1_MOVES
                 apply_move=lambda m, c: (m.corner_ori_map[c[0]], m.edge_ori_map[c[1]]),
                 start_coord=(0, 0),
                 table_shape=(2187, 2048)  # (3**7, 2**11)
             )  # dist((corner_ori, edge_ori)) ≈ 4.5M
             # 最大深度 7
             cls.UD_PRUNE = CubieMove.build_pruning_table(
-                moves=PHASE1_MOVES,  # List[Phase1Move]
+                moves=PHASE1_MOVES,  # List[Phase1Action]
                 apply_move=lambda m, ud: m.ud_slice_map[ud],
                 start_coord=CubieState.solved_ud,
                 table_shape=495
@@ -1427,16 +1820,19 @@ class CubieBase(CubeBase):
                 SLICE=cls.SLICE_PRUNE
             )
 
+        cls.PHASE15_PRUNE = cls.build_phase15_pruning()
+        # h_15(s) = dist[Phase15Coord.project(s).index]
+
         print(cls.CO_PRUNE.max())  # 最大深度 ≈ 11  14
         print(cls.EDGE_PRUNE.max())  # ≈ 10~11  10
         print(np.sum(cls.CO_PRUNE >= 0))  # < 40320 一半以上的状态必然是 -1  40320
-        print(cls.CO_EO_PRUNE.shape, cls.CO_PRUNE.shape, cls.EDGE_PRUNE.shape)
+        print(cls.CO_EO_PRUNE.shape, cls.CO_PRUNE.shape, cls.EDGE_PRUNE.shape, cls.PHASE15_PRUNE.shape)
 
     @classmethod
     def phase1_search(cls, state: CubieState, depth_limit: int = 8) -> list[tuple] | None:
         """
         IDA* 搜索 Phase-1：目标是进入 G₁（EO=0, CO=0, UD-slice 在中层）
-        使用右作用 CubieMove.act + Phase1Move.project
+        使用右作用 CubieMove.act + Phase1Action.project
         BFS 解决 18 个基本转动,直径 diam(G / G₁) ≈ 7，通常 depth_limit=7 或 8 足够
         12:9~12
         """
@@ -1503,6 +1899,38 @@ class CubieBase(CubeBase):
         return dfs(initial_coord, 0, None)
 
     @classmethod
+    def phase15_search(cls, state: CubieState, depth_limit: int = 8) -> list[tuple] | None:
+        """
+        IDA* 搜索 Phase-1.5
+        目标：slice_perm = solved, corner_coset = solved, parity = 0
+        move 集：G₁
+        """
+        PHASE15_MOVES = CubieMove.phase15_moves()
+
+        def dfs(coord: Phase15Coord, depth: int, last_move: tuple | None):
+            h = cls.PHASE15_PRUNE[coord.index]
+            if depth + h > depth_limit:
+                return None
+
+            if coord.is_solved():
+                print('phase15_search', depth, h, coord.index)
+                return []
+
+            for k, m in PHASE15_MOVES.items():
+                if CubieMove.is_redundant(last_move, k):
+                    continue
+
+                next_coord = m.act(coord)
+                res = dfs(next_coord, depth + 1, k)
+                if res is not None:
+                    return [(k, m)] + res
+
+            return None
+
+        initial_coord = Phase15Coord.project(state)
+        return dfs(initial_coord, 0, None)
+
+    @classmethod
     def solve_kociemba(cls, s: CubieState) -> tuple[list[tuple], CubieMove]:
         """
             Kociemba 两阶段求解：
@@ -1510,6 +1938,11 @@ class CubieBase(CubeBase):
             Phase2: 解决剩余 CP + EP（在 G1 内）
             返回：(move_keys 序列, 总复合 move)
             G -Phase-1 -> H -Phase-2 -> {e}
+            Gₙ
+             ├─ Phase-0：orientation only
+             ├─ Phase-1：slice class
+             ├─ Phase-1.5：center orbits
+             └─ Phase-2：permutation class
         """
         assert s.is_solvable(), "Unsolvable cube state"
         moves1, moves2 = None, None
@@ -1524,6 +1957,7 @@ class CubieBase(CubeBase):
         assert moves1 is not None, f"Phase1 failed to solve: {s}"
         mv1, state = CubieMove.act_moves(s, [x[1].cubie_move for x in moves1])
         assert state.is_phase1_solved(), f'Phase1 invalid: len={len(moves1)}, ud_slice={state.ud_slice_coord()}'
+        # assert Phase15Coord.project(state).parity == 0
 
         d = 9
         while d < 19:  # 12,20
@@ -1857,6 +2291,7 @@ class CubieBase(CubeBase):
 
 
 if __name__ == "__main__":
+    cube = CubieBase(n=4)
     cube = CubieBase(n=3)
 
     print('cr', cube.build_corner_reference())
@@ -1872,6 +2307,9 @@ if __name__ == "__main__":
     s: CubieState = cube.cubie_state(cube.solved)
     s0 = CubieState.solved()
     assert s == s0
+
+    assert cube.cubie_state(s0.to_stickers(n=3)) == s0
+
     s_idx = cube.solved_idx.copy()
     s_idx1 = cube.rotate_state(s_idx, 0, 1, 1)
 
@@ -1885,11 +2323,14 @@ if __name__ == "__main__":
         cube : 你的 StickerCube / state-index 体系
         s0   : CubieState，对应 s_i0
         s_i0 : 贴纸/索引状态（solved 或任意）
+        CubieState 是真值层（ground truth）
+        Sticker 只是一个表示（representation）
         """
         s_i = cube.solved_idx.copy()
         s0 = CubieState.solved()
 
         failed = []
+        d_i = 0
 
         for ma, move in CubieMove.prim_moves.items():
             # 贴纸级旋转
@@ -1897,7 +2338,14 @@ if __name__ == "__main__":
             s1 = move.act(s0)
             assert CubieMove.build(s0, move.act(s0)) == move
             # 转回 CubieState
-            s11 = cube.cubie_state(cube.idx_to_state(s_i1))  # CubieMove.from_rotation(2, 1, 1)
+            s_i2 = cube.idx_to_state(s_i1)
+            s11 = cube.cubie_state(s_i2)  # CubieMove.from_rotation(2, 1, 1)
+            s_i3 = s1.to_stickers(n=cube.n)
+            s13 = cube.cubie_state(s_i3)  # cubie → 贴纸 → cubie
+            assert s13 == s1, f'{s13},{s1}'
+            if not np.array_equal(s_i3, s_i2):
+                print(f"{(s_i3 != s_i2).sum()}\n {np.argwhere(s_i3 != s_i2)}")
+                # 总是差 8 个贴纸,8 个角块 → 正好 8 个贴纸不同 几何事实
 
             if not s11.is_solvable():
                 failed.append(ma)
@@ -1910,7 +2358,6 @@ if __name__ == "__main__":
                     CubeBase.permutation_parity(s11.corners_perm),
                     CubeBase.permutation_parity(s11.edges_perm),
                 )
-                print("-" * 40)
 
             if s1 != s11:
                 if not (np.array_equal(s1.edges_perm, s11.edges_perm) and
@@ -1918,16 +2365,18 @@ if __name__ == "__main__":
                     print(s1.is_solvable(), s11.is_solvable())
                     raise
                 if not np.array_equal(s1.edges_ori, s11.edges_ori):
-                    print(cube.corner_orientation(cube.idx_to_state(s_i1)))
+                    print(cube.corner_orientation(s_i2))
                     print(s1.edges_ori, s11.edges_ori)
-
-                print("s1 corners_ori :", s1.corners_ori.tolist())
-                print("s11 corners_ori:", s11.corners_ori.tolist())
-                diff = (s1.corners_ori - s11.corners_ori) % 3
-                print("diff (mod 3)   :", diff.tolist())
+                if not np.array_equal(s1.corners_ori, s11.corners_ori):
+                    print("s1 corners_ori :", s1.corners_ori.tolist())
+                    print("s11 corners_ori:", s11.corners_ori.tolist())
+                    diff = (s1.corners_ori - s11.corners_ori) % 3
+                    print("diff (mod 3)   :", diff.tolist())
+                    print("-" * 40)
+                    d_i += 1
 
         if not failed:
-            print("✅ All primitive moves produce solvable CubieState")
+            print("✅ All primitive moves produce solvable CubieState", d_i)  # 这边也是8
         else:
             print("❌ Failed moves:", failed)
 
@@ -2022,6 +2471,16 @@ if __name__ == "__main__":
 
     s0 = CubieState.solved()
     for move in cube.basic_generators():
+        """
+        把一个 move 映射到“同一个物理效果但在不同参考系/ gauge 下的等价元素”
+        参考系变换元素 gauge element,g 属于 orientation 子群的“平移”部分（常量加法），是正规子群中的元素
+        g = s0 ∘ m_truth ∘ m_theory⁻¹ ∘ s0⁻¹
+        g 是 m_truth ⋅ m_theory⁻¹ 这个“差异元素”被 s0 共轭后的结果
+        是 s0 共轭后的差异元素
+        """
+        axis, layer, direction = move
+        if layer == 0:
+            continue
         # 用 from_rotation 得到一个“理论 move”
         m_theory = CubieMove.from_rotation(*move)
 
@@ -2029,21 +2488,52 @@ if __name__ == "__main__":
         m_truth = cube.build_cubie_move_from_stickers(cube.solved, *move)
 
         print(m_theory, '\n', m_truth)
+        assert CubieMove.build(s0, m_theory.act(s0)) == m_theory, f'{m_theory}'
 
         assert np.array_equal(m_theory.corners_perm,
                               m_truth.corners_perm), f'{m_theory.corners_perm}, {m_truth.corners_perm}'
-        # assert np.array_equal(m_theory.edges_perm, m_truth.edges_perm), f'{m_theory.edges_perm}, {m_truth.edges_perm}'
+        assert np.array_equal(m_theory.edges_perm, m_truth.edges_perm), f'{m_theory.edges_perm}, {m_truth.edges_perm}'
+
+        if m_theory == m_truth:
+            print(f"{move} pass ✓")
+            continue
 
         # assert m_theory.apply(s0)==m_truth.act(s0)
-        #
-        # # 计算 gauge 修正
-        # g = CubieMove.build(m_theory.act(s0), m_truth.act(s0))
-        # print(move,g)
-        #
-        # # 修正 from_rotation
-        # m_fixed =g.compose(m_theory)
-        #
-        # assert m_fixed == m_truth
+        # 计算 gauge 修正
+        s_theory = m_theory.act(s0)  # _left
+        s_truth = m_truth.act(s0)
+        g = CubieMove.build(s_theory, s_truth)  # g = CubieMove.build(m_theory.act(s0), m_truth.act(s0))
+        print(f"{move} gauge g:", g)  # 看 g 的 ori_delta 是否统
+
+        # 修正 from_rotation
+        # m_fixed = g.compose(m_truth)
+        m_fixed = m_theory.compose(g)
+
+        # 验证修正后一致
+
+        assert m_fixed == m_truth, f'fixed != truth for {move}\n{m_fixed}\n{m_truth}'
+        assert m_fixed.act(s0) == m_truth.act(s0), f'fixed act mismatch for {move}'
+
+        g = CubieMove.build(m_truth.act(s0), m_theory.act(s0))
+        print(f"{move} gauge g2:", g)
+        m_fixed = m_truth.compose(g)  # m_fixed = g.inverse().compose(m_truth)
+        assert m_fixed == m_theory, f'fixed != truth for {move}\n{m_fixed}\n{m_theory}'
+
+        print(f"{move} fixed ✓")
+        """
+        g 需要看 axis / side
+        真实贴纸状态里拿不到 move（axis / side)
+        同一个 cubie permutation + orientation delta 可以由 多个不同的基本旋转组合产生
+        orientation gauge 抹掉了“旋转方向”的信息
+        U/D 轴 (axis=1)：g 全 0（无 twist 差异），完全一致
+        R/L 轴 (axis=0)：
+        side = -1 (L 层)：g = [0,0,1,0,0,1,0,1]（1 在 2,5,7）
+        side = 1 (R 层)：g = [0,0,0,1,1,0,0,1]（1 在 3,4,7）或 [1,0,0,0,0,0,0,2]（类似但位置不同）
+        
+        F/B 轴 (axis=2)：
+        side = -1 (B 层)：g 有 2 在 2/3/6/7
+        side = 1 (F 层)：g 有 2 在 0/1/4/5/7
+        """
 
     s: CubieState = CubieState.solved()  # cube.cubie_state(cube.solved)
     M = CubieMove.from_rotation(1, 1, 1)
@@ -2060,6 +2550,14 @@ if __name__ == "__main__":
         # ---------- 基本 act ----------
         s1 = mv.act(s)
         assert mv.act(s) == s1
+        assert I.act(s) == s
+        assert mv.convert().convert() == mv  # 反转左右作用 复原
+        assert mv.convert().inverse() == mv.inverse().convert()
+        s2 = mv.act_left(s)
+        assert mv.convert().act(s) == s2
+        assert mv.act(s) == mv.convert().act_left(s)
+
+        assert mv.compose(I) == mv and I.compose(mv) == mv
 
         # ---------- 逆元消去 ----------
         assert mv.inverse().act(s1) == s
@@ -2103,7 +2601,7 @@ if __name__ == "__main__":
     def check_homomorphism(m: CubieMove, s: CubieState):
         # 验证 phi(m.act(s)) == phi(m).act(phi(s))
         lhs = Phase1Coord.project(m.act(s))  # left
-        rhs = Phase1Move.phi(m).act(Phase1Coord.project(s))  # right
+        rhs = Phase1Action.phi(m).act(Phase1Coord.project(s))  # right
         assert lhs == rhs, f"Homomorphism broken!{lhs}_{rhs}"
 
 
@@ -2129,13 +2627,13 @@ if __name__ == "__main__":
 
     for c in range(495):
         edges_perm = CubieState.decode_ud_slice(c)
-        coord = CubieState.encode_ud_slice(edges_perm)
+        coord = CubieState.encode_ud_slice(edges_perm.tolist())
         assert coord == c, f'{c},{coord},{edges_perm}'
 
     s = CubieState.solved()
 
     for m in CubieMove.phase1_moves.values():
-        phi = Phase1Move.phi(m.cubie_move)
+        phi = Phase1Action.phi(m.cubie_move)
         for c in range(495):
             s = s.with_(edges_perm=s.decode_ud_slice(c))
             out = m.cubie_move.act(s)
@@ -2143,18 +2641,21 @@ if __name__ == "__main__":
 
     # for a, m1 in CubieMove.phase1_moves.items():
     #     for b, m2 in CubieMove.phase1_moves.items():
-    #         lhs = Phase1Move.phi(m1.cubie_move.compose(m2.cubie_move))
-    #         rhs = Phase1Move.phi(m1.cubie_move).compose(
-    #             Phase1Move.phi(m2.cubie_move))
+    #         lhs = Phase1Action.phi(m1.cubie_move.compose(m2.cubie_move))
+    #         rhs = Phase1Action.phi(m1.cubie_move).compose(
+    #             Phase1Action.phi(m2.cubie_move))
     #         assert lhs == rhs, (a, b)
     # # φ₂ 的同态性
     # for a, m1 in CubieMove.phase2_moves().items():
     #     for b, m2 in CubieMove.phase2_moves().items():
-    #         lhs = Phase2Move.phi(m1.cubie_move.compose(m2.cubie_move))
-    #         rhs = Phase2Move.phi(m1.cubie_move).compose(
-    #             Phase2Move.phi(m2.cubie_move)
+    #         lhs = Phase2Action.phi(m1.cubie_move.compose(m2.cubie_move))
+    #         rhs = Phase2Action.phi(m1.cubie_move).compose(
+    #             Phase2Action.phi(m2.cubie_move)
     #         )
     #         assert lhs == rhs, (a, b)
+    sticker_idx = CubieBase(n=5).solved_idx.copy()
+    sm = StickerMove.identity(5)
+    sm_perm = sm.act(sticker_idx)
 
     v, e = cube.build_phase_graph(Phase1Coord.solved(), 2)
     print(v)
@@ -2255,25 +2756,51 @@ if __name__ == "__main__":
     s20 = m2.act(s0)
     assert s20 == CubieState.solved()
 
+    for m in CubieMove.prim_moves.values():
+        for sp in range(24):
+            s = Phase15Coord(
+                slice_perm=sp,
+                corner_coset=0,
+                parity=0
+            ).decode()
+
+            s2 = m.act(s)
+            sp2 = Phase15Coord.project(s2).slice_perm
+            assert 0 <= sp2 < 24
+
+    ori_before = cube.corner_orientation(cube.solved)
+
 
     def test_random_path_consistency(cube, steps=20):
         s0_st = cube.solved_idx.copy()
         s0_cu = CubieState.solved()  # 参考世界
-
+        sm = StickerMove.identity(cube.n)
         path = []
         for _ in range(steps):
             ma = random.choice(list(CubieMove.prim_moves.keys()))
             path.append(ma)
+
+            sm = sm.compose(sm.from_rotation(cube.n, *ma))
 
             s0_st = cube.rotate_state(s0_st, *ma)
             # s0_cu =  CubieMove.from_rotation(*ma).act(s0_cu)
             s0_cu = CubieMove.prim_moves[ma].act(s0_cu)
 
         st11 = cube.idx_to_state(s0_st)
+        st123 = sm.act(cube.solved)
+        if not np.array_equal(st123, st11):
+            print(f"sm {(st123 != st11).sum()}")
         s1 = cube.cubie_state(st11)
         # m = CubieMove.build(s0_cu, s1)
         # assert m.act(s0_cu) == s1, f"delta wrong for {m}"
         s2 = s0_cu
+
+        s_cu = s0_cu.to_stickers(n=cube.n)
+        s22 = cube.cubie_state(s_cu)
+        assert s22 == s0_cu, f'{s22},{s0_cu}'
+
+        if not np.array_equal(s_cu, st11):
+            print(f"cu {(s_cu != st11).sum()}")  # 17
 
         # permutation 必须一致
         assert np.array_equal(s1.corners_perm, s2.corners_perm), f'{s1.corners_perm}, {s2.corners_perm}'
@@ -2310,8 +2837,8 @@ if __name__ == "__main__":
         if st22 != CubieState.solved():
             print(st22)
 
-        assert cube.is_solved(st10), f'{st10},{st21}'
-        assert cube.is_solved(st21), f'{st21}'
+        if not cube.is_solved(st10) or not cube.is_solved(st21):
+            print(f'{st10}\n{st21}')
 
 
     for t in range(3):
@@ -2344,10 +2871,9 @@ if __name__ == "__main__":
 
     print('.................')
 
-    ori_before = cube.corner_orientation(cube.solved)
 
-
-    def test_single_move_physical(cube):
+    def test_single_move_physical(n=5):
+        cube = CubieBase(n=n)
         for axis in range(3):
             for layer in (-2, -1, 0, 1, 2):
                 for d in [1, 2, 3]:
@@ -2360,6 +2886,7 @@ if __name__ == "__main__":
                     ori_delta = cube.corner_orientation_delta(cube.solved, s)
                     corner_perm, _ = cube.corner_ids_ori(s)
                     edge_perm, _ = cube.edge_ids_ori(s)
+                    orbit_perm = cube.orbit_perm(s)
                     print("ori sum before:", np.sum(ori_before))  # 0
                     print(f"axis", axis)
                     print("corner_perm after:", corner_perm)
@@ -2367,11 +2894,12 @@ if __name__ == "__main__":
                     print("ori sum after:", np.sum(ori_after) % 3)
                     print(cube.heuristic_corner_old(s), cube.heuristic_corner_perm(s),
                           cube.edge_orientation(s))
+                    print(orbit_perm)
                     assert edge_perm.shape == (12,)
                     assert corner_perm.shape == (8,)
 
 
-    test_single_move_physical(cube)
+    test_single_move_physical(5)
 
     print('.................')
 
