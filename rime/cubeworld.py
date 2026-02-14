@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from types import SimpleNamespace
 import random
-from copy import deepcopy
 
 
 class CubeEnv(CubieBase):
@@ -96,23 +95,23 @@ class RankingDataset(Dataset):
         """
         self.samples = []
         PHASE15_MOVES = CubieMove.phase15_moves()
+        actions = list(PHASE15_MOVES.values())
         cubie_phase1 = cube_env.generate_phase1_cubie()
         for _ in range(num_samples):
             # 1. 随机打乱 Phase-1 状态
             cubie = cube_env.generate_phase15_cubie(cubie_phase1)
             state = cubie.to_stickers(cube_env.n)
-            obs = cube_env.observables(state)  # 当前 CubieState 投影到向量表示
-
-            # 2. 获取动作列表
-            actions = list(PHASE15_MOVES.values())
+            obs = cube_env.observables(state)  # 当前 CubieState 投影到向量表示/causal_observables
 
             # 3. 选择正负动作
             # 正动作 → heuristic/critic 越小越好
             scored = []
             for a in actions:
-                next_cubie = a.act(cubie)
+                next_cubie, next_coord = a.act(cubie)
+                # dp = cube_env.delta_potential(state, a.token(cube_env.n)) #ActionToken.from_cubie_move
+                # scores.append((dp, a))
                 # 使用 heuristic 或 critic 评分
-                score = next_cubie.heuristic()  # 或 cube_env.critic(next_cubie)
+                score = next_coord.heuristic()  # 或 cube_env.critic(next_cubie)
                 scored.append((score, a))
 
             # 排序，越小越好
@@ -246,6 +245,76 @@ def train_ranking_critic_15(num_epochs=10, batch_size=32, lr=1e-3):
 
     return critic
 
+
+class StructuredMoveLayer(nn.Module):
+    """
+    Kociemba + 神经结构化群表示 Neural Group Theory
+    低秩线性变换, 共享基变换,不同 move 共享结构
+    s_next = s + A_m s
+    A_m = W1 @ diag(e_m) @ W2
+    (m1, m2, m3) 的组合等价于某个 coset shift
+    在同一组“基向量”上开关不同通道
+    约束:逆元一致性/组合一致性/共轭一致性
+    state_dim = D
+    rank = R   (32/64)
+
+    ρ(g) ≈ I + W_right (W_left(state) ⊙ e_g)
+    """
+
+    def __init__(self, state_dim, num_moves, rank=64):
+        super().__init__()
+        self.W_left = nn.Linear(state_dim, rank, bias=False)
+        self.W_right = nn.Linear(rank, state_dim, bias=False)
+        self.move_emb = nn.Embedding(num_moves, rank)  # Move embedding e_m ∈ R^R
+
+    def forward(self, state, move_id):
+        """
+        state: (B, D)
+        move_id: (B,)
+        """
+        z = self.W_left(state)  # (B, R)
+        e = self.move_emb(move_id)  # (B, R)
+        z = z * e  # elementwise scaling
+        delta = self.W_right(z)
+        return state + delta
+
+
+class GroupAwareMove(nn.Module):
+    """
+    结构感知 Move 层 Group Representation Layer
+    把“群作用”变成可微算子,学一个连续的群表示空间
+    连续群表示 + 离散投影
+    在连续 move 表示空间里找 e,优化 e 是可导的
+    +群结构一致性 loss （Structure Loss）
+    ρ(g) = exp(∑ e_g,i A_i)
+    适合 Phase 1.5 坐标低维
+    """
+
+    def __init__(self, state_dim, num_moves, rank):
+        super().__init__()
+        self.A = nn.Parameter(torch.randn(rank, state_dim, state_dim))
+        self.move_emb = nn.Embedding(num_moves, rank)
+
+    def forward(self, state, move_id):
+        e = self.move_emb(move_id)  # (B, R)
+        A_comb = torch.einsum("br,rdd->bdd", e, self.A)
+        delta = torch.bmm(A_comb, state.unsqueeze(-1)).squeeze(-1)
+        return state + delta
+
+
+def conjugation_loss(rho_a, rho_b, rho_aba_inv):
+    """
+    rho_a, rho_b, rho_aba_inv: (B, D, D) 矩阵表示
+    """
+    rho_a_inv = torch.inverse(rho_a)  # 或 torch.linalg.pinv 如果不可逆
+    right = rho_a @ rho_b @ rho_a_inv
+    left = rho_aba_inv
+
+    # Frobenius norm 差异
+    diff = left - right
+    loss = torch.norm(diff, p='fro', dim=(-2, -1)).pow(2).mean()  # batch mean
+
+    return loss
 
 if __name__ == "__main__":
     critic_model = train_ranking_critic_15()

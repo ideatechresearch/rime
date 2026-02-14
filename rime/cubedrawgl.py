@@ -80,7 +80,7 @@ class OpenGLCubeRenderer(BaseCubeRenderer):
         glRotatef(np.degrees(self.angles[1]), 0, 1, 0)
         glRotatef(np.degrees(self.angles[2]), 0, 0, 1)
 
-        self.colors = self.cube.color
+        self.colors = self.cube.faces_colors
         for face, i, j, quad in self.compute_face_quads():
             q = np.array(quad)
             color = self.colors[face][i][j]

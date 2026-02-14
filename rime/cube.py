@@ -132,7 +132,7 @@ class CubeBase:
     def is_solved(self, state: np.ndarray) -> bool:
         return bool(np.array_equal(state, self.solved))  # not (state ^ self.solved).any()
 
-    def is_solved_idx(self, state_idx: np.ndarray) -> bool:
+    def is_solved_by_idx(self, state_idx: np.ndarray) -> bool:
         return bool(np.array_equal(self.idx_to_state(state_idx), self.solved))
 
     def diff_coords(self, state: np.ndarray) -> np.ndarray:
@@ -404,6 +404,7 @@ class CubeBase:
     def permutation_parity(perm: np.ndarray | list) -> int:
         """
         Return 0 for even, 1 for odd permutation
+        0（偶置换）或 1（奇置换）
         """
         visited = np.zeros(len(perm), dtype=bool)
         parity = 0
@@ -417,7 +418,7 @@ class CubeBase:
                 j = perm[j]
                 cycle_len += 1
             if cycle_len > 0:
-                parity ^= (cycle_len - 1) & 1
+                parity ^= (cycle_len - 1) & 1  # 奇长循环贡献奇置换 (cycle_len % 2)
         return parity
 
     def dfs(self, state: np.ndarray, depth: int, bound, visited, path, max_depth: int = 25):
@@ -548,20 +549,6 @@ class CubeBase:
         if c == 0 and layer >= mid:
             layer_idx -= 1
         return layer_idx
-
-    @staticmethod
-    def layer_to_side(layer: int, n: int) -> int | None:
-        """
-        最外层 → ±1
-        中心层 → 0（奇数:0, 偶数:-1）
-        其他中间层 → None
-        """
-        mid, c = divmod(n, 2)
-        if abs(layer) == mid:
-            return 1 if layer > 0 else -1
-        if layer == 0 or (c == 0 and layer == -1):
-            return 0
-        return None
 
     @staticmethod
     def layer_to_logic(layer: int, n: int) -> float:
@@ -1156,7 +1143,7 @@ class CubeBase:
                     next_f = next_item[0]
                     next_normal = cls.face_normal[next_f]  # next_pos = next_item[3]
                     cross = np.cross(curr_normal, next_normal)
-                    if np.dot(cross, v_corner) > 0:  # 右手定则 顺时针
+                    if np.dot(cross, v_corner) < 0:  # 右手定则 顺时针 >0
                         sorted_group.append(remaining.pop(i))
                         break
                 else:  # 如果叉积失败，fallback 到面优先级
@@ -1168,6 +1155,7 @@ class CubeBase:
             result[cid] = [(cls.face_idx[f], r, c) for f, r, c, _ in sorted_group]
 
         assert len(result) == 8, f"Expected 8 corners, got {len(result)}"
+        print([''.join([cls.FACES[y[0]] for y in x]) for x in result], '\n', cls.corner_face_cycle())
         return result
 
     @staticmethod
@@ -1432,11 +1420,11 @@ class StickerCube(CubeBase):
         return tuple(self.cube.flatten())
 
     @property
-    def color(self) -> dict:
-        return self.get_color(self.cube)
+    def faces_colors(self) -> dict:
+        return self.get_colors(self.cube)
 
     @classmethod
-    def get_color(cls, state: np.ndarray) -> dict:
+    def get_colors(cls, state: np.ndarray) -> dict:
         """返回原来使用的 face->二维字符串颜色矩阵"""
         n = state.shape[1]
         face_stickers = cls.get_face_stickers(n=n)  # 返回 [(r, c, pos), ...] 按渲染顺序
@@ -1899,7 +1887,7 @@ if __name__ == "__main__":
     print(cube.face_def())
     print(cube.corner_face_cycle)
     print(cube.edge_face_cycle)
-    print(cube.color)
+    print(cube.faces_colors)
 
     xx = cube.corner_coords(5)
     yy = cube.edge_coords(5)
@@ -2025,7 +2013,7 @@ if __name__ == "__main__":
     # print(mvs0)
 
     print(cube.is_solved())
-    print(cube.color)
+    print(cube.faces_colors)
 
     AXIS_VEC = {
         0: (1, 0, 0),

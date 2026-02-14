@@ -126,7 +126,7 @@ class BaseCubeRenderer:
     def __init__(self, cube: StickerCube, scale: float = None):
         self.cube = cube
         self.n = cube.n
-        self.colors: dict = cube.color
+        self.colors: dict = cube.faces_colors
         self.partial = None
         self.last_rotated = None
 
@@ -264,7 +264,7 @@ class CubeRenderer(BaseCubeRenderer):
 
         R = CubeBase.rotation_matrix(self.angles)
         quads = self.compute_face_quads()
-        self.colors = self.cube.color
+        self.colors = self.cube.faces_colors
         # build transformed quads and z depth, taking into account partial rotation
         draw_list = []
         for face, i, j, quad in quads:
@@ -503,7 +503,7 @@ class RubiksCubeDraw:
                         print(len(pending_moves))
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_l:
-                        print(self.cube.color)
+                        print(self.cube.faces_colors)
                     elif ev.key == pygame.K_c:  # 清空 pending 队列
                         # clear pending
                         self.pending.clear()
@@ -532,4 +532,4 @@ if __name__ == "__main__":
 
     app = RubiksCubeDraw(cube)
     app.run()
-    print(cube.color)
+    print(cube.faces_colors)
