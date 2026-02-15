@@ -975,19 +975,24 @@ class CubieMove:
         """判断当前 move 是否是 prim_moves 中的基本转动"""
         return any(m is self for m in self.prim_moves.values())
 
+    @class_property('PRIM_MOVE_IDX')
+    def move_idx(cls) -> dict[tuple, int]:
+        """所有 18 个基本 move（U D R L F B 的 ±90° 和 180°） 6 faces × {1,2,3} """
+        moves = []
+        for axis in (0, 1, 2):
+            for side in (-1, +1):
+                for direction in (-1, +1, +2):
+                    moves.append((axis, side, direction))
+        return {k: i for i, k in enumerate(moves)}  # face_id = move_id // 3
+
     @class_property('PRIM_MOVES')
     def prim_moves(cls) -> dict[tuple, 'CubieMove']:
         """
         CubieMove  ──apply──▶ CubieState
-        18 BFS / IDDFS 深度可能 +1 / 所有 18 个基本 move（U D R L F B 的 ±90° 和 180°）
+        18 BFS / IDDFS 深度可能 +1
         外层转动，中间层用扩展 moves 生成
         """
-        prim_moves = {}  # 生成 CubieMove delta
-        for axis in (0, 1, 2):
-            for side in (-1, +1):
-                for direction in (-1, +1, +2):
-                    prim_moves[(axis, side, direction)] = cls.from_rotation(axis, side, direction)  # .convert()
-        return prim_moves
+        return {k: cls.from_rotation(*k) for k, _ in cls.move_idx.items()}  # 生成 CubieMove delta
 
     @class_property('SLICE_MOVES')
     def slice_moves(cls) -> dict[tuple, 'CubieMove']:
@@ -1616,6 +1621,7 @@ class Phase15Coord:
 
     @property
     def index(self) -> int:
+        """index=slice∗70∗2+corner∗2+parity"""
         N_CORNER = 70
         return ((self.slice_perm * N_CORNER + self.corner_coset) << 1) | self.parity
 
@@ -2231,74 +2237,6 @@ class CubieBase(CubeBase):
             max_nodes=max_nodes
         )
 
-    @staticmethod
-    def draw_phase_graph(nodes, edges,
-                         title: str = "Phase Schreier Graph (depth 2)",
-                         figsize: tuple = (14, 12),
-                         save_path: str = None
-                         ):
-        """
-        可视化 Phase 的 Schreier 图
-
-        nodes: {coord: depth}
-        edges: [(src_coord, (axis, side, dir), dst_coord)]
-        save_path: 如果提供，则保存为 PNG
-        """
-        import networkx as nx
-        import matplotlib.pyplot as plt
-        G = nx.DiGraph()  # 有向图
-
-        # 添加节点（用 tuple key 作为节点名）
-        for coord, depth in nodes.items():
-            G.add_node(coord, depth=depth)
-
-        max_d = max(nodes.values()) if nodes else 1
-        depths = [data['depth'] for _, data in G.nodes(data=True)]  # [nodes[n] for n in G.nodes()]
-        node_colors = [plt.cm.viridis(d / max_d) for d in depths]
-        # degrees = dict(G.out_degree())
-        node_sizes = [max(100, 1000 - 200 * d) for d in depths]  # [300 + 100 * degrees[n] for n in G.nodes()]
-        # 边标签（动作）
-        edge_labels = {}
-        for src, label, dst in edges:
-            G.add_edge(src, dst)
-            edge_labels[(src, dst)] = f"{label}"  # label 是 (axis, side, dir)
-        # 节点标签（简化显示，只显示 corner_coset 或完整 tuple）
-        node_labels = {k: f"{k}" for k in G.nodes()}
-        # 布局（spring 适合小图，kamada_kawai 更美观）
-        pos = nx.kamada_kawai_layout(G, scale=2.5, center=(0, 0), dim=2)  # 或 nx.spring_layout(G, k=0.5, iterations=50)
-
-        plt.figure(figsize=figsize)
-        nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_colors,
-                               edgecolors="black")  # node_color="lightblue",
-        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="->", arrowsize=15)
-
-        nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=10)  # font_weight='bold'
-
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8, font_color="blue")
-
-        plt.title(title)
-        plt.axis("off")
-        plt.tight_layout()
-        if save_path:
-            base = save_path.rsplit('.', 1)[0] if '.' in save_path else save_path
-            plt.savefig(f"{base}.png", dpi=300, bbox_inches='tight')
-            plt.savefig(f"{base}.pdf", dpi=600, bbox_inches='tight', format='pdf')
-            print(f"图已保存到 {base}.png 和 {base}.pdf")
-        plt.show()
-        return plt.gcf()
-
-    @staticmethod
-    def draw_cycle_graph(perm, title="Cubie Permutation Cycles"):
-        import networkx as nx
-        import matplotlib.pyplot as plt
-        G = nx.DiGraph()
-        for i, j in enumerate(perm):
-            G.add_edge(i, j)
-        pos = nx.circular_layout(G)
-        nx.draw(G, pos, with_labels=True, node_color='lightblue', arrows=True)
-        plt.title(title)
-        plt.show()
-
     @classmethod
     def build_pruning_table(cls):
         # 离线构建器
@@ -2380,9 +2318,13 @@ class CubieBase(CubeBase):
         print(np.sum(cls.CO_PRUNE >= 0))  # < 40320 一半以上的状态必然是 -1  40320
         print(cls.CO_EO_PRUNE.shape, cls.CO_PRUNE.shape, cls.EDGE_PRUNE.shape, cls.PHASE15_PRUNE.shape)
         print(cls.CO_EO_PRUNE[:3])
-        print(cls.CO_PRUNE[:10])
-        print(cls.EDGE_PRUNE[:10])
-        print(cls.PHASE15_PRUNE[:10])
+        print(cls.CO_PRUNE[:10], '...', cls.CO_PRUNE[-10:])
+        print(cls.EDGE_PRUNE[:10], '...', cls.EDGE_PRUNE[-10:])
+        print(cls.PHASE15_PRUNE[:10], '...', cls.PHASE15_PRUNE[-10:])
+        print(cls.SLICE_PRUNE)
+        print(np.bincount(cls.CO_PRUNE))
+        print(np.bincount(cls.EDGE_PRUNE))
+        print(np.bincount(cls.PHASE15_PRUNE[cls.PHASE15_PRUNE != 127]))
 
     @classmethod
     def phase1_search(cls, cubie: CubieState, depth_limit: int = 8) -> list[tuple] | None:
@@ -3255,6 +3197,7 @@ if __name__ == "__main__":
     print(CubieState.non_slice_edges)
     print(CubieState.ud_slice_edges)
     print(CubieState.solved_ud)  # 69
+    print('move_id', CubieMove.move_idx)
     print(Phase1Coord.project(CubieState.solved()))
 
     print('rotate_map', cube.build_rotate_map())

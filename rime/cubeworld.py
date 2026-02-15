@@ -302,6 +302,65 @@ class GroupAwareMove(nn.Module):
         return state + delta
 
 
+class LieMoveRepresentation(nn.Module):
+    def __init__(self, num_moves, state_dim, lie_rank):
+        super().__init__()
+
+        self.num_moves = num_moves
+        self.state_dim = state_dim
+        self.lie_rank = lie_rank
+
+        # 1️⃣ move embedding (α_i)
+        self.move_emb = nn.Embedding(num_moves, lie_rank)
+        # self.face_emb = nn.Embedding(6, lie_rank)  # 只学习 6 个面
+
+        # 2️⃣ Lie algebra basis (A_k)
+        self.A = nn.Parameter(
+            torch.randn(lie_rank, state_dim, state_dim) * 0.01
+        )
+
+    def skew(self, M):
+        return M - M.transpose(-1, -2)
+
+    # def lie_element_face(self, move_id):
+    #     '''
+    #     0-2: U, U2, U'
+    #     3-5: D, D2, D'
+    #     ...'''
+    #     face_id = move_id // 3
+    #     power = move_id % 3 + 1  # 1,2,3
+    #
+    #     alpha = self.face_emb(face_id)          # (batch, r)
+    #
+    #     X = torch.einsum("br,rdd->bdd", alpha, self.A)
+    #     X = self.skew(X)
+    #
+    #     # power scaling
+    #     X = X * power.unsqueeze(-1).unsqueeze(-1)
+    #     return X
+
+    def lie_element(self, move_id):
+        """
+        返回 X = sum_k α_k A_k
+        shape: (batch, d, d)
+        """
+        alpha = self.move_emb(move_id)  # (batch, r)
+
+        # einsum: α_k A_k
+        X = torch.einsum("br,rdd->bdd", alpha, self.A)
+        # X = self.skew(X) 反对称矩阵
+        return X
+
+    def forward(self, state, move_id):
+        """
+        state: (batch, d)
+        move_id: (batch,)
+        """
+        X = self.lie_element(move_id)
+        rho = torch.matrix_exp(X)  # (batch, d, d)
+        return torch.bmm(rho, state.unsqueeze(-1)).squeeze(-1)
+
+
 def conjugation_loss(rho_a, rho_b, rho_aba_inv):
     """
     rho_a, rho_b, rho_aba_inv: (B, D, D) 矩阵表示
@@ -315,6 +374,7 @@ def conjugation_loss(rho_a, rho_b, rho_aba_inv):
     loss = torch.norm(diff, p='fro', dim=(-2, -1)).pow(2).mean()  # batch mean
 
     return loss
+
 
 if __name__ == "__main__":
     critic_model = train_ranking_critic_15()

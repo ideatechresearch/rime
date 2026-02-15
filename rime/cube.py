@@ -530,7 +530,7 @@ class CubeBase:
                 for axis, pair in enumerate(cls.AXIS_FACE)
                 for side, face in enumerate(pair)}
 
-    @class_property('FACE_DEF_AXIS')
+    @class_property('FACE_DEF_IDX')
     def face_idx(cls) -> dict:
         return {f: i for i, f in enumerate(cls.FACES)}
 
