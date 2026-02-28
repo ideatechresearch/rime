@@ -142,7 +142,6 @@ class CubeBase:
     def heuristic(self, state: np.ndarray):
         """
         估价函数：错误块的数量（简单启发）,对 BFS/IDA*/Beam search 可用,小魔方适用
-        heuristic(embedding)
         """
         errors = np.count_nonzero(state != self.solved)
         return errors // max(1, self.n)  # 每个错误影响多个面
@@ -153,15 +152,8 @@ class CubeBase:
 
     @staticmethod
     def embedding(state_idx: np.ndarray) -> np.ndarray:
-        """MLP, n 变化（比如同时训练 3×3，甚至 7×7），网络就很难学到一致的模式"""
-        n = state_idx.shape[1]
-        # (state_idx // (n * n)).astype(float) + (state_idx % (n * n)).astype(float) / (n * n)
-        return state_idx.astype(float) / (n * n)
-
-    @staticmethod
-    def embedding_relative(state_idx: np.ndarray) -> np.ndarray:
         """
-        Transformer / GNN 相对坐标 [color,u,v]
+        Transformer / GNN 相对坐标 relative[color,u,v]
         返回: (batch, 6*n*n, 3)
         """
         if state_idx.ndim == 3:
@@ -1415,7 +1407,7 @@ class StickerCube(CubeBase):
         return hash(super().encode(self.cube))
 
     @property
-    def flatten_key(self) -> tuple:
+    def key(self) -> tuple:
         """把 cube 转成 tuple"""
         return tuple(self.cube.flatten())
 
@@ -1902,8 +1894,8 @@ if __name__ == "__main__":
 
     print('encode_state', cube.encode_state(cube.cube))
     print('encode_state_idx', cube.encode_state(cube.solved_idx).astype(float) / (cube.n * cube.n))
-    print('embedding', cube.embedding(cube.solved_idx))
-    print('embedding_relative', cube.embedding_relative(cube.solved_idx))
+
+    print('embedding_relative', cube.embedding(cube.solved_idx))
 
     xxx = cube.get_layer_stickers(0, 1, 5)
     print(len(xxx), xxx)

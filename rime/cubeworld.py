@@ -893,6 +893,8 @@ if __name__ == "__main__":
         dataset = joblib.load('data/phase15_dataset.pkl')
     print(len(dataset), sum([x[4].is_phase1_solved() for x in dataset]),
           sum([x[3].is_phase1_solved() for x in dataset]))  # 275731 59371 102499
+    total_ready = {d[4].key: d[4] for d in dataset if d[4].is_phase2_ready()}
+    print(f"unique phase2 ready:{len(total_ready)}")
 
     from collections import defaultdict
 
@@ -921,6 +923,7 @@ if __name__ == "__main__":
 
     for k, v in sorted(stats.items()):
         print(f"move {k[0]}:{CubieMove.move_idx[k[0]]}, cubie/next_phase1={(k[1], k[2])} → {v} 次")
+
     """
     总 group 数量 (state.key + move_id): 261447
     唯一转移 (next_state.key 唯一): 261447 (100.00%)

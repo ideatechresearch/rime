@@ -3,6 +3,7 @@ from rime.base import class_property, class_cache, class_status
 from rime.cube import CubeBase, StickerCube
 from dataclasses import dataclass
 import numpy as np
+from scipy.linalg import block_diag
 from math import comb, factorial
 from collections import deque
 import random
@@ -67,6 +68,9 @@ class CubieState:
                 np.array_equal(self.edges_ori, other.edges_ori)
         )
 
+    def __hash__(self):
+        return hash(self.encode_state().tobytes())  # dtype=np.uint8
+
     def is_same(self, other):
         return (
                 np.array_equal(self.corners_perm, other.corners_perm) and
@@ -76,7 +80,6 @@ class CubieState:
 
     @property
     def key(self) -> tuple:
-        # return hash(self.encode_state().tobytes())
         corner_ori = self.corner_ori_coord()
         edge_ori = self.edge_ori_coord()
         corner_idx = self.encode_perm(self.corners_perm.tolist())
@@ -1002,20 +1005,6 @@ class CubieMove:
         return state
 
     @staticmethod
-    def perm_matrix(move_perm: np.ndarray) -> np.ndarray:
-        """
-        perm: new_pos = perm[old_pos]
-        返回矩阵 M 使得 new_P = M @ P
-        """
-        n = len(move_perm)
-        M = np.zeros((n, n), dtype=np.float32)
-        for old in range(n):
-            new = move_perm[old]
-            M[new, old] = 1.0
-
-        return M
-
-    @staticmethod
     def is_redundant(last, cur) -> bool:
         if last is None:
             return False
@@ -1032,7 +1021,7 @@ class CubieMove:
     @property
     def is_primitive(self) -> bool:
         """判断当前 move 是否是 prim_moves 中的基本转动"""
-        return any(m is self for m in self.prim_moves.values())
+        return any(m is self or m == self for m in self.prim_moves.values())
 
     @class_property('PRIM_MOVES_IDX')
     def move_idx(cls) -> list[tuple]:
@@ -1051,15 +1040,64 @@ class CubieMove:
         token = ActionToken.from_cubie_move(*k, n=n)
         return token.embedding(n=n)  # total 8 dim
 
-    def embedding(self):
+    def embedding(self) -> np.ndarray:
+        """
+        群表示
+        [ cp (64) | ep (144) | co (8 complex) | eo (12) ]
+        np.allclose(Mg @ Mh, Mgh) ρ(g)ρ(h)=ρ(gh)
+        np.allclose(Mh @ Mh.T.conj(), Mg)  ρ(M)ρ(M)∗=I # 单位性
+        np.allclose(M.inverse().embedding(),Mh.T.conj()) # 逆元
+        """
+        Cp = np.zeros((64, 64), dtype=np.float32)
+        for old_pos in range(8):
+            new_pos = self.corners_perm[old_pos]
+            for cubie in range(8):
+                old_index = old_pos * 8 + cubie
+                new_index = new_pos * 8 + cubie
+                Cp[new_index, old_index] = 1.0
+
+        Ep = np.zeros((144, 144), dtype=np.float32)
+        for old_pos in range(12):
+            new_pos = int(self.edges_perm[old_pos])
+            for cubie in range(12):
+                old_index = int(old_pos) * 12 + int(cubie)
+                new_index = new_pos * 12 + cubie
+                Ep[new_index, old_index] = 1.0
+
+        omega = np.exp(2j * np.pi / 3)
+        Co = np.zeros((8, 8), dtype=np.complex64)
+        for i in range(8):
+            delta = self.corners_ori_delta[i]
+            Co[i, i] = omega ** delta
+
+        Eo = np.zeros((12, 12), dtype=np.float32)
+        for i in range(12):
+            delta = self.edges_ori_delta[i]
+            Eo[i, i] = -1.0 if delta % 2 else 1.0
+
+        return block_diag(Cp, Ep, Co, Eo)  # (228, 228)
+
+    def move_matrix(self) -> np.ndarray:
         """
         群表示
         move_matrix:[ cp (64) | ep (144) | co (8 complex) | eo (12) ]
-        np.allclose(Mg @ Mh, Mgh)
         """
-        from scipy.linalg import block_diag
-        M_row_corner = self.perm_matrix(self.corners_perm)
-        M_row_edge = self.perm_matrix(self.edges_perm)
+
+        def perm_matrix(move_perm: np.ndarray) -> np.ndarray:
+            """
+            perm: new_pos = perm[old_pos]
+            返回矩阵 M 使得 new_P = M @ P
+            """
+            n = len(move_perm)
+            M = np.zeros((n, n), dtype=np.float32)
+            for old in range(n):
+                new = move_perm[old]
+                M[new, old] = 1.0
+
+            return M
+
+        M_row_corner = perm_matrix(self.corners_perm)
+        M_row_edge = perm_matrix(self.edges_perm)
 
         M_cp = np.kron(M_row_corner, np.eye(8))
         M_ep = np.kron(M_row_edge, np.eye(12))
@@ -1075,10 +1113,10 @@ class CubieMove:
         for old in range(12):
             new = self.edges_perm[old]
             delta = self.edges_ori_delta[old]
-            sign = 1.0 if delta == 0 else -1.0
+            sign = -1.0 if delta % 2 else 1.0
             M_eo[new, old] = sign
 
-        return block_diag(M_cp, M_ep, M_co, M_eo)
+        return block_diag(M_cp, M_ep, M_co, M_eo)  # (228, 228)
 
     @class_property('PRIM_MOVES')
     def prim_moves(cls) -> dict[tuple, 'CubieMove']:
@@ -1139,38 +1177,6 @@ class CubieMove:
                 #     moves[key] =  m.compose(m)  # 合并了对称的 180°
 
         return {k: Phase2Action.phi(m) for k, m in moves.items()}
-
-    @staticmethod
-    def generate_commutator_moves(gens: dict[tuple, 'CubieMove'], max_len: int = 20) -> dict:
-        """
-        返回可用的 commutator 序列,构造局部操作序列
-        commutator(A, B) = A B A⁻¹ B⁻¹
-        防止非法 orientation
-        防止 parity 错误
-        防止 edge flip / corner twist
-        保证物理可达，筛掉非法状态
-
-        贴纸世界	冗余，迁移
-        cubie 世界	搜索空间裁剪
-        IDA* / Kociemba	必需
-        """
-        commutators = {}
-        solved = CubieState.solved()
-
-        for A, A_move in gens.items():
-            for B, B_move in gens.items():
-                if A == B:
-                    continue
-
-                seq = ActionToken.commutator([A], [B])
-                if len(seq) > max_len:
-                    continue
-                m = A_move.compose(B_move)
-                s = m.act(solved)
-                if s.is_phase1_solved():  # check_state/is_solvable
-                    commutators[tuple(seq)] = m
-
-        return commutators
 
     @property
     def edge_parity_delta(self) -> int:
@@ -1965,26 +1971,42 @@ class StickerMove:
         CubeBase.rotate_core(state_idx, token.axis, token.layer, token.direction)
         return cls(perm=state_idx.reshape(-1))  # flatten np.argsort
 
-    def center_perm(self, n: int) -> np.ndarray:
+    @property
+    def N(self) -> int:
+        L = self.perm.shape[0]
+        n_float = np.sqrt(L / 6)
+        if not n_float.is_integer():
+            raise ValueError(f"Length {L} is not divisible by 6 or not a perfect square")
+        return int(n_float)
+
+    def center_perm(self) -> np.ndarray:
         """
            返回一维 center_perm：
            index = center sticker 全局编号
            value = 被 move 后送来的 sticker 编号
         """
-        perm = self.perm.reshape(6, n, n)
+        n = self.N
+        state_idx = self.perm.reshape(6, n, n)
         centers = CubeBase.get_center_rings(n)
 
         flat = []
         for fidx, rings in enumerate(centers):
             for ring in rings:
                 for r, c, _ in ring:
-                    flat.append(perm[fidx, r, c])
+                    flat.append(state_idx[fidx, r, c])
         return np.array(flat, dtype=np.int32)
 
     def __eq__(self, other):
         if not isinstance(other, StickerMove):
             return NotImplemented
         return np.array_equal(self.perm, other.perm)
+
+    def embedding(self) -> np.ndarray:
+        """MLP, n 变化（比如同时训练 3×3，甚至 7×7），网络就很难学到一致的模式"""
+        n = self.N
+        state_idx = self.perm.reshape(6, n, n)
+        # (state_idx // (n * n)).astype(float) + (state_idx % (n * n)).astype(float) / (n * n)
+        return state_idx.astype(float) / (n * n)
 
     def inverse(self) -> "StickerMove":
         inv = np.empty_like(self.perm)
@@ -2747,7 +2769,7 @@ class CubieBase(CubeBase):
           - 标准 Singmaster U/D, F/B 轴定义
         """
         U, D, F, B = self.face_idx['U'], self.face_idx['D'], self.face_idx['F'], self.face_idx['B']
-        ori = np.zeros(12, dtype=np.uint8)  # edges_ori (12)
+        ori = np.zeros(12, dtype=np.int8)  # edges_ori (12)
         for i, edge_def in enumerate(self.edge_coords(self.n)):
             (f1, r1, c1), (f2, r2, c2) = edge_def
             c1v, c2v = state[f1, r1, c1], state[f2, r2, c2]
@@ -3174,12 +3196,45 @@ class CubieBase(CubeBase):
                 next_cubie, next_coord = m.act(cubie)
                 dataset.append((coord, move_id, next_coord,
                                 cubie, next_cubie,
-                                cubie_phase15, step,
+                                cubie_phase1, step,  # cubie_phase15
                                 ))  # step 轨迹内部的进度标记,保留起点信息,部分 move 可以偶然修复 next_cubie.is_phase1_solved()
                 coord = next_coord
                 cubie = next_cubie
 
         return dataset
+
+    @staticmethod
+    @class_status('测试')
+    def generate_commutator_moves(gens: dict[tuple, 'CubieMove'], max_len: int = 20) -> dict:
+        """
+        返回可用的 commutator 序列,构造局部操作序列
+        commutator(A, B) = A B A⁻¹ B⁻¹
+        防止非法 orientation
+        防止 parity 错误
+        防止 edge flip / corner twist
+        保证物理可达，筛掉非法状态
+
+        贴纸世界	冗余，迁移
+        cubie 世界	搜索空间裁剪
+        IDA* / Kociemba	必需
+        """
+        commutators = {}
+        solved = CubieState.solved()
+
+        for A, A_move in gens.items():
+            for B, B_move in gens.items():
+                if A == B:
+                    continue
+
+                seq = ActionToken.commutator([A], [B])
+                if len(seq) > max_len:
+                    continue
+                m = A_move.compose(B_move)
+                s = m.act(solved)
+                if s.is_phase1_solved():  # check_state/is_solvable
+                    commutators[tuple(seq)] = m
+
+        return commutators
 
     def get_phase15_M(cls):
         '''
@@ -3621,7 +3676,7 @@ if __name__ == "__main__":
     m = StickerMove.from_rotation(3, ActionToken(0, 0, 1))
     m_inv = m.inverse()
     assert np.all(m_inv.perm[m.perm] == np.arange(54))
-
+    print('embedding', m.embedding())
     cube0 = StickerCube(n=3)
 
     s = cube0.solved_idx  # s = cube0.solved  # StickerCube
@@ -3759,6 +3814,22 @@ if __name__ == "__main__":
     assert I.compose(M) == M
     assert M.compose(M.inverse()) == I, f'{M},{M.inverse()}'
     assert M.inverse().compose(M) == I
+    Mg = I.move_matrix()
+    print(Mg.shape)  # (228, 228)
+    eigvals = np.linalg.eigvals(Mg)
+    print(np.unique(np.round(eigvals, 6)))  # [1.+0.j]
+
+    Mg = I.embedding()
+    print(Mg.shape)  # (228, 228)
+    eigvals = np.linalg.eigvals(Mg)
+    print(np.unique(np.round(eigvals, 6)))  # [1.+0.j]
+
+    Mh = M.embedding()  # move_matrix
+    print(np.trace(Mh))  # (148+0j)
+    Mgh = I.compose(M).embedding()
+    assert np.allclose(Mg @ Mh, Mgh)
+    assert np.allclose(Mh @ Mh.T.conj(), Mg)  # 单位性
+    assert np.allclose(M.inverse().embedding(), Mh.T.conj())
 
     for mv in CubieMove.prim_moves.values():
         # ---------- 基本 act ----------
@@ -3789,6 +3860,25 @@ if __name__ == "__main__":
         assert mv.edges_ori_delta.sum() % 2 == 0
 
         assert mv.act(s).is_solvable()  # 所有 prim move 保持可解
+
+        Mh = mv.embedding()
+        Mgh = I.compose(mv).embedding()
+        assert np.allclose(Mg @ Mh, Mgh)
+        assert np.allclose(Mh @ Mh.T.conj(), Mg)  # 单位性
+
+        print(np.trace(Mh))  # (148+0j)
+        """
+        3 个共轭类
+        (148+0j)
+        (142+0j)
+        (134+0j)
+        """
+        rank = np.linalg.matrix_rank(Mh - np.eye(228))
+        print(rank)
+
+
+        # eigvals = np.linalg.eigvals(Mh)
+        # print(np.unique(np.round(eigvals, 6)))
 
     I = CubieMove.identity()
     s = CubieState.solved()
