@@ -134,7 +134,7 @@ class class_property:
                 setattr(cls, cache_name, value)
         print(f"类 {cls.__name__} 的属性已从 {prop_dir} 加载")
 
-
+#lru_cache
 class class_cache:
     def __init__(self, cache_name: str = None, key=None):
         self.cache_name = cache_name

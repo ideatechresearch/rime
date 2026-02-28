@@ -74,9 +74,51 @@ class CubieState:
                 np.array_equal(self.edges_ori, other.edges_ori)
         )
 
+    @property
+    def key(self) -> tuple:
+        # return hash(self.encode_state().tobytes())
+        corner_ori = self.corner_ori_coord()
+        edge_ori = self.edge_ori_coord()
+        corner_idx = self.encode_perm(self.corners_perm.tolist())
+        edge_idx = self.encode_perm(self.edges_perm.tolist())
+        return corner_idx, edge_idx, corner_ori, edge_ori
+
     def encode_state(self) -> np.ndarray:
-        """40:(12+8)*2"""
+        """
+        40:(12+8)*2,
+        perm 是离散标签（0~7, 0~11）ori 是模数空间（Z3 / Z2)
+        """
         return np.concatenate([self.corners_perm, self.edges_perm, self.corners_ori, self.edges_ori])
+
+    def embedding(self) -> np.ndarray:
+        """
+        perm_onehot+ ori unitroot/sign
+        64 + 144 + 8 + 12 = 228
+        """
+        onehot = np.zeros((8, 8), dtype=np.float32)  # onehot
+        for i in range(8):
+            onehot[i, self.corners_perm[i]] = 1.0
+        cp = onehot.flatten()  # 64
+
+        onehot = np.zeros((12, 12), dtype=np.float32)
+        for i in range(12):
+            onehot[i, self.edges_perm[i]] = 1.0
+        ep = onehot.flatten()  # 144
+
+        omega = np.exp(2j * np.pi / 3)
+        co = np.zeros(8, dtype=np.complex64)  # 8
+        for i in range(8):
+            if self.corners_ori[i] == 0:
+                co[i] = 1
+            elif self.corners_ori[i] == 1:
+                co[i] = omega
+            else:
+                co[i] = omega ** 2
+
+        vec = np.where(self.edges_ori == 0, 1.0, -1.0)
+        eo = vec.astype(np.float32)  # 12
+
+        return np.concatenate([cp, ep, co, eo])
 
     def to_stickers(self, n: int = 3) -> np.ndarray:
         """
@@ -473,11 +515,13 @@ class CubieState:
     #     return sorted(ud_slice_pos)  # canonical: 排序，确保 canonical
 
     @staticmethod
-    def encode_ud_slice_perm(edges_perm: list[int]) -> int:
+    def encode_perm_ud_slice(edges_perm: list[int]) -> int:
         """
         UD-slice 内 4 个 edge 的排列,内部排列的 identity 编码->内部顺序
-        Phase-1 已保证 membership 正确（即哪些 edge 在 slice 位置已固定）
+        Phase-1 已保证 membership 正确（即哪些 edge 在 slice 位置已固定），不检查
         返回 [0, 24) 只关心否等于 0（identity）
+        encode_perm_coord(...,positions = SLICE_POSITIONS,
+        cubies = sorted([edges_perm[p] for p in CubeBase.SLICE_POSITIONS])）
         """
         slice_edges = [edges_perm[pos] for pos in CubeBase.SLICE_POSITIONS]  # slice 中的 4 个位置（固定）
         rank = {piece: i for i, piece in enumerate(sorted(slice_edges))}
@@ -565,7 +609,8 @@ class ActionToken:
         return self.axis, side, dir_norm
 
     def embedding(self, n: int = 3) -> np.ndarray:
-        """动作的几何性质
+        """
+        动作的几何性质，几何 embedding
         axis:      0,1,2 (X,Y,Z)
         layer:     -mid .. +mid
         direction: -1 (逆90), 2 (180), +1 (顺90)
@@ -957,6 +1002,20 @@ class CubieMove:
         return state
 
     @staticmethod
+    def perm_matrix(move_perm: np.ndarray) -> np.ndarray:
+        """
+        perm: new_pos = perm[old_pos]
+        返回矩阵 M 使得 new_P = M @ P
+        """
+        n = len(move_perm)
+        M = np.zeros((n, n), dtype=np.float32)
+        for old in range(n):
+            new = move_perm[old]
+            M[new, old] = 1.0
+
+        return M
+
+    @staticmethod
     def is_redundant(last, cur) -> bool:
         if last is None:
             return False
@@ -975,15 +1034,51 @@ class CubieMove:
         """判断当前 move 是否是 prim_moves 中的基本转动"""
         return any(m is self for m in self.prim_moves.values())
 
-    @class_property('PRIM_MOVE_IDX')
-    def move_idx(cls) -> dict[tuple, int]:
+    @class_property('PRIM_MOVES_IDX')
+    def move_idx(cls) -> list[tuple]:
         """所有 18 个基本 move（U D R L F B 的 ±90° 和 180°） 6 faces × {1,2,3} """
         moves = []
         for axis in (0, 1, 2):
             for side in (-1, +1):
                 for direction in (-1, +1, +2):
                     moves.append((axis, side, direction))
-        return {k: i for i, k in enumerate(moves)}  # face_id = move_id // 3
+        return moves  # face_id = move_id // 3 {k: i for i, k in enumerate(moves)}
+
+    @class_cache('PRIM_MOVE_EMB', key=lambda move_id, n=3: (move_id, n))
+    @classmethod
+    def prim_embedding(cls, move_id: int, n: int = 3) -> np.ndarray:
+        k = cls.move_idx[move_id]
+        token = ActionToken.from_cubie_move(*k, n=n)
+        return token.embedding(n=n)  # total 8 dim
+
+    def embedding(self):
+        """
+        群表示
+        move_matrix:[ cp (64) | ep (144) | co (8 complex) | eo (12) ]
+        np.allclose(Mg @ Mh, Mgh)
+        """
+        from scipy.linalg import block_diag
+        M_row_corner = self.perm_matrix(self.corners_perm)
+        M_row_edge = self.perm_matrix(self.edges_perm)
+
+        M_cp = np.kron(M_row_corner, np.eye(8))
+        M_ep = np.kron(M_row_edge, np.eye(12))
+
+        omega = np.exp(2j * np.pi / 3)
+        M_co = np.zeros((8, 8), dtype=np.complex64)  # corner_ori_matrix
+        for old in range(8):
+            new = self.corners_perm[old]
+            delta = self.corners_ori_delta[old]
+            M_co[new, old] = omega ** delta  # 乘以一个对角复数矩阵
+
+        M_eo = np.zeros((12, 12), dtype=np.float32)  # edge_ori_matrix
+        for old in range(12):
+            new = self.edges_perm[old]
+            delta = self.edges_ori_delta[old]
+            sign = 1.0 if delta == 0 else -1.0
+            M_eo[new, old] = sign
+
+        return block_diag(M_cp, M_ep, M_co, M_eo)
 
     @class_property('PRIM_MOVES')
     def prim_moves(cls) -> dict[tuple, 'CubieMove']:
@@ -992,7 +1087,7 @@ class CubieMove:
         18 BFS / IDDFS 深度可能 +1
         外层转动，中间层用扩展 moves 生成
         """
-        return {k: cls.from_rotation(*k) for k, _ in cls.move_idx.items()}  # 生成 CubieMove delta
+        return {k: cls.from_rotation(*k) for k in cls.move_idx()}  # 生成 CubieMove delta
 
     @class_property('SLICE_MOVES')
     def slice_moves(cls) -> dict[tuple, 'CubieMove']:
@@ -1649,7 +1744,7 @@ class Phase15Coord:
     def project(cls, s: CubieState) -> "Phase15Coord":
         """ encode 状态空间裁剪  在 Phase-2 中，corner parity 与 edge parity 必须匹配"""
         # 1. slice_perm（Phase1 已保证 membership）
-        slice_perm = CubieState.encode_ud_slice_perm(s.edges_perm.tolist())  # 0..23
+        slice_perm = CubieState.encode_perm_ud_slice(s.edges_perm.tolist())  # 0..23
         # 2. corner_coset（U 层是哪 4 个 corner）
         corner_coset = CubieState.encode_corner_coset(s.corners_perm.tolist())
         # 3. edge parity
@@ -1669,7 +1764,8 @@ class Phase15Coord:
         return self.slice_perm == 0 and self.corner_coset == CubieState.solved_corner_coset and self.parity == 0
 
     def embedding(self) -> np.ndarray:
-        """返回神经网络输入向量"""
+        """群的商空间指示函数,返回神经网络输入向量 95 维 one-hot,
+        商群指标表示,为了搜索/压缩设计的,不是为了表示群结构设计的"""
         # 简单 one-hot style embedding
         slice_vec = np.zeros(24, dtype=np.float32)
         slice_vec[self.slice_perm % 24] = 1.0
@@ -1778,7 +1874,7 @@ class Phase15Action(QuotientMove):
             # membership 固定 + slice 内排列 = i
             s = solved.with_(edges_perm=CubieState.create_ud_slice_perm(i))
             s2 = m.act(s)
-            slice_perm_map[i] = CubieState.encode_ud_slice_perm(s2.edges_perm.tolist())
+            slice_perm_map[i] = CubieState.encode_perm_ud_slice(s2.edges_perm.tolist())
 
         # corner_coset
         for i in range(70):  # C(8,4)=70
@@ -2175,23 +2271,27 @@ class CubieBase(CubeBase):
         return dist
 
     @staticmethod
-    @class_status('测试')
-    def build_phase15_pruning_by_idx() -> np.ndarray:
+    def build_phase15_pruning_by_idx(starts: list[CubieState] = None) -> np.ndarray:
+        """
+        Phase 1+5 的 pruning table 并不是“群作用”,从 solved 开始扩散覆盖不到所有 Phase1 结束后真正能出现的坐标
+        可达状态数在 1616～1670 之间，占总空间的 ≈48%～50%
+        最大距离 ≈7～8 步
+        starts：phase2_ready
+        """
         N_PHASE15 = 24 * 70 * 2
         INF = 127
         dist = np.full(N_PHASE15, INF, dtype=np.int8)
 
         PHASE15_MOVES = list(CubieMove.phase15_moves.values())
-
-        # Multi-source: one per coset and parity
+        if not starts:
+            starts = [CubieState.solved()]
         queue = deque()
-        for coset in range(70):
-            for p in (0, 1):
-                rep = Phase15Coord(slice_perm=0, corner_coset=coset, parity=p)
-                idx = rep.index
-                if dist[idx] == INF:
-                    dist[idx] = 0
-                    queue.append(idx)
+        for s in starts:
+            coord = Phase15Coord.project(s)
+            idx = coord.index
+            if dist[idx] == INF:
+                dist[idx] = 0
+                queue.append(idx)
 
         while queue:
             cur = queue.popleft()
@@ -2207,7 +2307,8 @@ class CubieBase(CubeBase):
                     queue.append(nxt)
 
         reachable = np.sum(dist < INF)
-        print(f"Reachable: {reachable}/{N_PHASE15}")
+        print(f"Reachable: {reachable}/{N_PHASE15},mean:{np.mean(dist[dist < INF]):.4f}"
+              f"\nDist Count:{np.bincount(dist[dist < INF])}")
         return dist
 
     @classmethod
@@ -2831,9 +2932,8 @@ class CubieBase(CubeBase):
         """
         face_idx = self.face_idx[face]
         center_color = face_idx
-        n = self.n
         count = np.sum(state[face_idx] == center_color)
-        return count / (n * n)
+        return count / (self.n * self.n)
 
     def face_entropy(self, state: np.ndarray) -> np.ndarray:
         """
@@ -3014,7 +3114,8 @@ class CubieBase(CubeBase):
         """Phase-1 solved cubie_state"""
         moves = list(CubieMove.phase1_moves().values())
         state = CubieState.solved()
-        for _ in range(max_depth):
+        depth = np.random.randint(1, max_depth + 1)
+        for _ in range(depth):  # max_depth
             m = random.choice(moves)
             state = m.replay(state)
 
@@ -3043,6 +3144,205 @@ class CubieBase(CubeBase):
         if not cubie.is_phase1_solved():  # "Phase-1 被破坏"
             cubie = cls.solve_phase1(cubie)[2]  # 只取最终 cubie_state
         return cubie
+
+    @classmethod
+    def generate_phase15_dataset(cls, max_depth: int = 10, num_starting_points: int = 20,
+                                 num_samples: int = 5000) -> list:
+        ''''
+        Phase15Coord 只是 Phase-1.5 子群的投影，信息是丢失的，必须保留 cubie
+        随机游走采样，单步转移（single-step transition）
+        起点多样性 20
+        总转移数 6000-8000
+        '''
+        PHASE15_MOVES = CubieMove.phase15_moves()
+        MOVE_IDX = CubieMove.move_idx()
+        starting_pool = [cls.generate_phase1_cubie(max_depth=20) for _ in range(num_starting_points)]  # 提前生成起点池
+        dataset = []
+        for _ in range(num_samples):
+            cubie_phase1 = np.random.choice(starting_pool).clone()  # 从池子里随机选一个起点
+            cubie_phase15 = cls.generate_phase15_cubie(cubie_phase1, max_depth=8)  # 随机打乱 Phase-1 状态
+            cubie = cubie_phase15.clone()
+            coord = Phase15Coord.project(cubie)
+            # state = coord.embedding()
+            # score = coord.heuristic()
+            # cid = coord.index
+            depth = np.random.randint(1, max_depth + 1)
+            for step in range(depth):
+                move_id = np.random.choice(range(len(MOVE_IDX)))  # 18
+                m_k = MOVE_IDX[move_id]
+                m = PHASE15_MOVES[m_k]
+                next_cubie, next_coord = m.act(cubie)
+                dataset.append((coord, move_id, next_coord,
+                                cubie, next_cubie,
+                                cubie_phase15, step,
+                                ))  # step 轨迹内部的进度标记,保留起点信息,部分 move 可以偶然修复 next_cubie.is_phase1_solved()
+                coord = next_coord
+                cubie = next_cubie
+
+        return dataset
+
+    def get_phase15_M(cls):
+        '''
+        M(d, θ) = E[Δ parity | distance=d, corner=θ]
+        径向过程是主导,角向调制是真实的，但高度可压缩（有效维度 ≈ 4）rank=5 补齐剩余线性自由度
+        壳层之间主方向不共享固定基
+        角向自由度随 r 连续漂移
+        整体维度 ≈ 4~5
+        角向高维 + 低秩调制
+        '''
+        N_SLICE = 24
+        N_CORNER = 70
+        N_PARITY = 2
+
+        dist = cls.PHASE15_PRUNE
+        print(np.bincount(dist))  # [   1   13  102  515 1447 1183   99]
+        # 重塑成 (24, 70, 2)
+        dist_3d = dist.reshape(N_SLICE, N_CORNER, N_PARITY)
+        # 把 127 替换成 NaN，便于热图显示为灰色/白色
+        dist_3d = np.where(dist_3d == 127, np.nan, dist_3d)
+        data_0 = dist_3d[:, :, 0]  # (24, 70)
+        data_1 = dist_3d[:, :, 1]
+        p_delta = data_1 - data_0  # ∈ {-1,0,1}
+        print(p_delta.shape, p_delta.min(), p_delta.max())
+
+        dist_flat = data_0.flatten()
+        new_dist_flat = data_1.flatten()
+        delta_flat = p_delta.flatten()
+        unique_d = np.unique(dist_flat)
+        print(len(delta_flat), np.corrcoef(delta_flat, dist_flat)[0, 1])
+        # A = np.vstack([dist_flat, np.ones_like(dist_flat)]).T
+        # coef, _, _, _ = np.linalg.lstsq(A, new_dist_flat, rcond=None)
+        # residual = new_dist_flat - coef[0] * dist_flat + coef[1]
+        # print(np.std(residual),np.unique(residual))
+
+        for d in unique_d:
+            mask = dist_flat == d
+            vals = delta_flat[mask]
+            print(
+                f"d={d}  "
+                f"-1:{np.mean(vals == -1):.2f}  "  # neg_ratio
+                f"0:{np.mean(vals == 0):.2f}  "
+                f"+1:{np.mean(vals == 1):.2f}  "  # pos_ratio
+                f"std:{np.std(new_dist_flat[mask]):.6f}"
+            )
+
+        D = sorted(unique_d)  # 距离层（radial layer）离散值 0-6,D ≈ 7（壳层）
+        C = N_CORNER  # C ≤ 70（corner）
+        M_raw = np.zeros((len(D), C))  # M_avg
+        V_D = [None] * len(D)
+
+        for i, d in enumerate(D):
+            mask = dist_3d[:, :, 0] == d  # 选择当前距离层的所有点
+            block = np.where(mask, p_delta, np.nan)  # 屏蔽非当前距离层
+            M_raw[i] = np.nanmean(block, axis=(0, 1))  # 对 slice/另一个维度平均，得到角向均值
+
+            # valid_cols = ~np.isnan(block).all(axis=0)
+            # B = block[:, valid_cols]
+            # B = np.nan_to_num(B, nan=0.0)
+            B = np.nan_to_num(block, nan=0.0)  # 不删列
+            U_d, S_d, Vt_d = np.linalg.svd(B, full_matrices=False)
+            V_D[i] = Vt_d
+            ratio = S_d ** 2 / np.sum(S_d ** 2)
+            rank_d = (S_d > 1e-6).sum()
+            print(d, rank_d, ratio[:3])  # 是否存在统一角向子空间
+
+        # for i, d1 in enumerate(D):
+        #     for j, d2 in enumerate(D):
+        #         # u1 = U_D[d1][:,0]
+        #         v1 = V_D[i][0, :]  # U_d[:, :k] 第一角向模态
+        #         v2 = V_D[j][0, :]
+        #         cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))  # 主模态跨层 cosine,奇异向量是否跨层对齐
+        #         print(f"d1={d1}, d2={d2}, cos={cos:.4f}")  # 不是所有壳层共享同一个 θ 而是 θ 随 r 平滑旋转
+        #         # 角向主方向随着 r 单调变化
+        #
+        # Theta = np.stack([V_D[i][0, :] for i in range(len(D))])  # (7, 70)
+        # U2, S2, V2 = np.linalg.svd(Theta, full_matrices=False)  # 每层的主角向模态联合 SVD
+        # print("Explained ratio across shells:", S2 ** 2 / np.sum(S2 ** 2))  # 不存在统一角向子空间
+        #
+        # for k in range(4):
+        #     vec = V2[k]  # (70,) cubie group 分解
+        #     print(np.argsort(np.abs(vec))[-10:])
+        #     for delta_val in [-1, 0, 1]:
+        #         mask = delta_flat == delta_val
+        #         print(f"Mode {k}, delta {delta_val}: mean {vec[mask[:70]].mean():.4f}")
+        """
+        单个距离层的角向分布本身是高维的,低秩来自层之间的“对齐”或“相关性”
+        0.0 1 [1. 0. 0.]
+        1.0 4 [0.25 0.25 0.25]
+        2.0 22 [0.13662735 0.11186389 0.09163437]
+        3.0 24 [0.28860816 0.09246434 0.07245906]
+        4.0 24 [0.27545707 0.07417986 0.07312078]
+        5.0 24 [0.3933974  0.0643495  0.05869728]
+        6.0 18 [0.21496932 0.15570672 0.12163538]
+        不存在统一角向子空间，虽然每层是高维的，但层与层之间存在对齐结构。
+        Explained ratio across shells: [0.29692753 0.2014328  0.15423826 0.1427982  0.09835902 0.06577302 0.04047117]
+        Mode 0, delta -1: mean 0.0801
+        Mode 0, delta 0: mean -0.0504
+        Mode 0, delta 1: mean -0.1261
+        Mode 1, delta -1: mean 0.1116
+        Mode 1, delta 0: mean 0.0939
+        Mode 1, delta 1: mean 0.0622
+        Mode 2, delta -1: mean 0.0156
+        Mode 2, delta 0: mean 0.0011
+        Mode 2, delta 1: mean 0.0277
+        Mode 3, delta -1: mean 0.0024
+        Mode 3, delta 0: mean 0.0672
+        Mode 3, delta 1: mean -0.0103
+        共享“变化方向”
+        """
+        # valid_cols = ~np.isnan(M_raw).all(axis=0)
+        # M = M_raw[:, valid_cols]  # 去掉全 NaN 的 corner
+        # print( np.sum(~np.isnan(M)),np.nanstd(M, axis=1))
+        # row_std = np.nanstd(M, axis=1, keepdims=True)
+        ## M_std = np.nan_to_num((M - np.nanmean(M, axis=1, keepdims=True)) / row_std, nan=0.0)
+        # valid_rows = np.ones(M.shape[0], dtype=bool)
+        # D_valid = np.array(D)[valid_rows]
+        # radial_profile = np.nanmean(M, axis=1)  # (7,)
+        # for d, val in zip(D_valid, radial_profile):#径向剖面（每个距离层的平均 p_delta）
+        #     print(f"d={d}: p_Δ = {val:.6f}")
+        '''
+        (d=0.0): p_Δ = 1.000000
+        (d=1.0): p_Δ = 1.000000
+        (d=2.0): p_Δ = 0.741935
+        (d=3.0): p_Δ = 0.614108
+        (d=4.0): p_Δ = 0.154286
+        (d=5.0): p_Δ = -0.518459
+        (d=6.0): p_Δ = -0.918367
+        '''
+
+        M_keep = np.full((len(D), C), np.nan)
+        for i, d in enumerate(D):
+            mask_d = dist_3d[:, :, 0] == d  # (slice, corner)
+            for c in range(C):
+                values = p_delta[mask_d[:, c], c]  # 取该 d 层该 θ 的值
+                if len(values) > 0:
+                    M_keep[i, c] = values.mean()
+        # 构造矩阵
+        M_np = M_keep.copy()  # (7, 70)
+
+        valid_cols = ~np.isnan(M_np).all(axis=0)  # 去掉全nan列
+        M_np = M_np[:, valid_cols]  # 未中心化 M_clean
+        mask = ~np.isnan(M_np)  # 标记观测值
+        print("Observed count:", mask.sum())  # 283
+
+        # 做 SVD 分析
+        M_centered = M_np - np.nanmean(M_np, axis=1, keepdims=True)  # 行中心化,去掉每行的均值
+        M_clean = np.nan_to_num(M_centered, nan=0.0)  # Phase1.5 是径向主导，角向其实可以填 0 或用平均值, 防止残留 NaN 导致 SVD 崩溃
+        U, S, Vt = np.linalg.svd(M_clean, full_matrices=False)
+        explained_ratio = S ** 2 / np.sum(S ** 2)  # 角向模态解释方差累积: np.cumsum(explained_ratio)
+        print("singular values:", S)
+        print("explained ratio:", explained_ratio)
+        """
+        singular values: [9.18326505e+00 5.01761404e+00 2.22274471e+00 1.67290484e+00
+         1.61810289e+00 2.92488830e-16 1.89293979e-17]
+        explained ratio: [7.03553697e-01 2.10037827e-01 4.12175510e-02 2.33477743e-02
+         2.18431505e-02 7.13709673e-34 2.98934892e-36]
+        """
+        n_rank = min(5, len(S))
+        modes_layers = np.zeros((M_clean.shape[0], n_rank))
+        for k in range(n_rank):
+            modes_layers[:, k] = U[:, k] * S[k]  # 对每个层的贡献 = U[:, k] * S[k] （奇异值加权）
+        return dist_3d, M_np, M_clean, mask
 
     @staticmethod
     @class_status('实验用')
@@ -3223,7 +3523,7 @@ if __name__ == "__main__":
         assert back == i, f"Fail at {i}: {back}"
 
     for i in range(24):
-        j = CubieState.encode_ud_slice_perm(CubieState.create_ud_slice_perm(i).tolist())
+        j = CubieState.encode_perm_ud_slice(CubieState.create_ud_slice_perm(i).tolist())
         assert j == i, f"Fail at {i}: {j}"
     for i in range(70):
         j = CubieState.encode_corner_coset(CubieState.canonical_corner_coset(i).tolist())
