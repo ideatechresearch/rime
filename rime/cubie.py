@@ -80,33 +80,40 @@ class CubieState:
 
     @property
     def key(self) -> tuple:
-        corner_ori = self.corner_ori_coord()
-        edge_ori = self.edge_ori_coord()
         corner_idx = self.encode_perm(self.corners_perm.tolist())
         edge_idx = self.encode_perm(self.edges_perm.tolist())
+        corner_ori = self.corner_ori_coord()
+        edge_ori = self.edge_ori_coord()
         return corner_idx, edge_idx, corner_ori, edge_ori
 
-    def encode_state(self) -> np.ndarray:
-        """
-        40:(12+8)*2,
-        perm 是离散标签（0~7, 0~11）ori 是模数空间（Z3 / Z2)
-        """
-        return np.concatenate([self.corners_perm, self.edges_perm, self.corners_ori, self.edges_ori])
+    @classmethod
+    def from_key(cls, key: tuple) -> "CubieState":
+        corners_perm = np.array(cls.decode_perm(key[0], 8), dtype=np.int8)
+        edges_perm = np.array(cls.decode_perm(key[1], 12), dtype=np.int8)  # np.int32
+        corners_ori = cls.decode_corner_ori(key[2])
+        edges_ori = cls.decode_edge_ori(key[3])
+        return CubieState(
+            corners_perm=corners_perm,
+            corners_ori=corners_ori,
+            edges_perm=edges_perm,
+            edges_ori=edges_ori,
+        )
 
-    def embedding(self) -> np.ndarray:
+    @property
+    def vec(self) -> np.ndarray:
         """
+        ρ_vec(g) ∈ ℂ^228
+        把群元素（状态）映射到一个 228 维表示空间中的向量
         perm_onehot+ ori unitroot/sign
         64 + 144 + 8 + 12 = 228
+        返回 ρ(g)·v₀ 的结果（embedding 视角）
+         v0 = solved.vec
+         rho_g @ v0
+        sizes = [64, 144, 8, 12]
+        v_real = np.concatenate([v.real, v.imag], axis=1)
         """
-        onehot = np.zeros((8, 8), dtype=np.float32)  # onehot
-        for i in range(8):
-            onehot[i, self.corners_perm[i]] = 1.0
-        cp = onehot.flatten()  # 64
-
-        onehot = np.zeros((12, 12), dtype=np.float32)
-        for i in range(12):
-            onehot[i, self.edges_perm[i]] = 1.0
-        ep = onehot.flatten()  # 144
+        cp = np.eye(8, dtype=np.float32)[self.corners_perm].flatten()  # 64
+        ep = np.eye(12, dtype=np.float32)[self.edges_perm].flatten()  # 144
 
         omega = np.exp(2j * np.pi / 3)
         co = np.zeros(8, dtype=np.complex64)  # 8
@@ -120,8 +127,14 @@ class CubieState:
 
         vec = np.where(self.edges_ori == 0, 1.0, -1.0)
         eo = vec.astype(np.float32)  # 12
+        return np.concatenate([cp, ep, co, eo])  # 228
 
-        return np.concatenate([cp, ep, co, eo])
+    def encode_state(self) -> np.ndarray:
+        """
+        40:(12+8)*2,
+        perm 是离散标签（0~7, 0~11）ori 是模数空间（Z3 / Z2)
+        """
+        return np.concatenate([self.corners_perm, self.edges_perm, self.corners_ori, self.edges_ori])
 
     def to_stickers(self, n: int = 3) -> np.ndarray:
         """
@@ -545,7 +558,6 @@ class CubieState:
         # membership 固定 + slice 内排列 = i
         rel_perm = cls.decode_perm(ud_slice, 4)  # 解码相对索引
         new_slice_pieces = [slice_pieces_sorted[j] for j in rel_perm]
-
         for pos, p in zip(slice_positions, new_slice_pieces):
             edges_perm[pos] = p
 
@@ -699,6 +711,7 @@ class CubieMove:
     ori_delta: dict[int, np.ndarray]      # orbit_id -> Δ (mod k)
     先验形式:群作用、生成元、右作用
     Permutation/Abelian Representation
+    排列部分是交错群,方向部分是阿贝尔群
     """
     # permutation: new_pos = perm[old_pos]
     corners_perm: np.ndarray  # σ_c (8,) / tuple[int, ...]
@@ -768,14 +781,15 @@ class CubieMove:
 
     def convert(self) -> "CubieMove":
         """
-        桥梁（双向）act_left ↔ act
+        桥梁（双向）act_left ↔ act opposite
+        坐标系翻转、符号约定改变
         Convert this move (assuming left/right action delta) to right/left action equivalent.
         Δ_left = -Δ_right   (mod k)
         delta = -delta % mod
         """
         return CubieMove(
-            corners_perm=self.corners_perm,
-            corners_ori_delta=(-self.corners_ori_delta) % 3,  # 翻转符号
+            corners_perm=self.corners_perm,  # perm 不变，位置关系不变
+            corners_ori_delta=(-self.corners_ori_delta) % 3,  # 翻转符号，每个块的扭转方向反过来
             edges_perm=self.edges_perm,
             edges_ori_delta=(-self.edges_ori_delta) % 2,
         )
@@ -854,6 +868,91 @@ class CubieMove:
             edges_perm=np.arange(12, dtype=np.int8),
             edges_ori_delta=np.zeros(12, dtype=np.int8),
         )
+
+    def matrix(self) -> np.ndarray:
+        """
+        Right action operator on row vectors
+        rho_as_transition 单个基本移动 m 的表示 ρ(m),生成元表示，右作用线性算子
+        状态转移矩阵（位置视角，通常等价于 rho().T 在置换部分）
+        move_matrix:[ cp (64) | ep (144) | co (8 complex) | eo (12) ]
+        用于多次移动合成：new_state = old_state @ M
+        M @ M.T.conj() == I 共轭转置矩阵，在矩阵是酉矩阵（或实正交矩阵）时等同于逆矩阵
+        平凡表示数量：8 + 12 + 1 + 1 = 22
+        其余：56 + 132 + 7 + 11 = 206
+        """
+
+        def perm_matrix(move_perm: np.ndarray) -> np.ndarray:
+            """
+            permutation 线性算子,作用在 行空间
+            perm: new_pos = perm[old_pos]
+            返回矩阵 M 使得 new_P = M @ P
+            """
+            n = len(move_perm)
+            M = np.zeros((n, n), dtype=np.float32)
+            for old in range(n):
+                new = move_perm[old]
+                M[new, old] = 1.0
+
+            return M  # (n,n)
+
+        M_cp = np.kron(perm_matrix(self.corners_perm), np.eye(8))
+        M_ep = np.kron(perm_matrix(self.edges_perm), np.eye(12))
+
+        omega = np.exp(2j * np.pi / 3)
+        M_co = np.zeros((8, 8), dtype=np.complex64)  # corner_ori_matrix
+        for old in range(8):
+            new = self.corners_perm[old]
+            delta = self.corners_ori_delta[old]
+            M_co[new, old] = omega ** delta  # 乘以一个对角复数矩阵
+
+        M_eo = np.zeros((12, 12), dtype=np.float32)  # edge_ori_matrix
+        for old in range(12):
+            new = self.edges_perm[old]
+            delta = self.edges_ori_delta[old]
+            sign = -1.0 if delta % 2 else 1.0
+            M_eo[new, old] = sign
+
+        return block_diag(M_cp, M_ep, M_co, M_eo)  # (228, 228)
+
+    def rho(self) -> np.ndarray:
+        """
+        rho_as_group_element 块追踪视角 描述状态,群元素线性群表示,直和表示
+        线性表示矩阵，矩阵 ρ(g),把这个 move 视为群元素 m，返回 ρ(m)
+        [ cp (64) | ep (144) | co (8 complex) | eo (12) ]
+        1）Permutation 部分采用 one-hot 置换表示，直接构造标准置换矩阵，确保与群作用一一对应；
+        2）Orientation 部分采用单位根嵌入，将 0/1/2 映射为 1, e^{2πi/3}, e^{4πi/3}，在复数域中构造严格线性表示，使 orientation 运算在乘法结构下自然闭合。
+        ρ(g)ρ(h) = ρ(gh)
+        ρ(g^{-1}) = ρ(g)^* 逆元
+        ρ(g)ρ(g)^* = I  单位性
+        """
+        Cp = np.zeros((64, 64), dtype=np.float32)
+        corners_perm = self.corners_perm.astype(np.int32)
+        for old_pos in range(8):
+            new_pos = corners_perm[old_pos]
+            for cubie in range(8):
+                old_index = old_pos * 8 + cubie
+                new_index = new_pos * 8 + cubie
+                Cp[new_index, old_index] = 1.0
+
+        Ep = np.zeros((144, 144), dtype=np.float32)
+        edges_perm = self.edges_perm.astype(np.int32)
+        for old_pos in range(12):
+            new_pos = edges_perm[old_pos]  # int()
+            for cubie in range(12):
+                old_index = old_pos * 12 + cubie
+                new_index = new_pos * 12 + cubie
+                Ep[new_index, old_index] = 1.0
+
+        # # 计算 delta/ 当前状态视为从 solved 到达的群元素 g，返回其表示矩阵 ρ(g)
+        # co_delta = (self.corners_ori - solved.corners_ori) % 3
+        # eo_delta = (self.edges_ori - solved.edges_ori) % 2
+
+        omega = np.exp(2j * np.pi / 3)
+
+        Co = np.diag(np.array([omega ** o for o in self.corners_ori_delta], dtype=np.complex64))  # (8,8) complex
+        Eo = np.diag(np.where(self.edges_ori_delta % 2 == 0, 1.0, -1.0)).astype(np.float32)
+
+        return block_diag(Cp, Ep, Co, Eo)  # (228, 228) 完整表示矩阵 ρ(g)  complex128
 
     def __eq__(self, other):
         if not isinstance(other, CubieMove):
@@ -1018,7 +1117,6 @@ class CubieMove:
 
         return False
 
-    @property
     def is_primitive(self) -> bool:
         """判断当前 move 是否是 prim_moves 中的基本转动"""
         return any(m is self or m == self for m in self.prim_moves.values())
@@ -1035,88 +1133,10 @@ class CubieMove:
 
     @class_cache('PRIM_MOVE_EMB', key=lambda move_id, n=3: (move_id, n))
     @classmethod
-    def prim_embedding(cls, move_id: int, n: int = 3) -> np.ndarray:
+    def embedding(cls, move_id: int, n: int = 3) -> np.ndarray:
         k = cls.move_idx[move_id]
         token = ActionToken.from_cubie_move(*k, n=n)
         return token.embedding(n=n)  # total 8 dim
-
-    def embedding(self) -> np.ndarray:
-        """
-        群表示
-        [ cp (64) | ep (144) | co (8 complex) | eo (12) ]
-        np.allclose(Mg @ Mh, Mgh) ρ(g)ρ(h)=ρ(gh)
-        np.allclose(Mh @ Mh.T.conj(), Mg)  ρ(M)ρ(M)∗=I # 单位性
-        np.allclose(M.inverse().embedding(),Mh.T.conj()) # 逆元
-        """
-        Cp = np.zeros((64, 64), dtype=np.float32)
-        for old_pos in range(8):
-            new_pos = self.corners_perm[old_pos]
-            for cubie in range(8):
-                old_index = old_pos * 8 + cubie
-                new_index = new_pos * 8 + cubie
-                Cp[new_index, old_index] = 1.0
-
-        Ep = np.zeros((144, 144), dtype=np.float32)
-        for old_pos in range(12):
-            new_pos = int(self.edges_perm[old_pos])
-            for cubie in range(12):
-                old_index = int(old_pos) * 12 + int(cubie)
-                new_index = new_pos * 12 + cubie
-                Ep[new_index, old_index] = 1.0
-
-        omega = np.exp(2j * np.pi / 3)
-        Co = np.zeros((8, 8), dtype=np.complex64)
-        for i in range(8):
-            delta = self.corners_ori_delta[i]
-            Co[i, i] = omega ** delta
-
-        Eo = np.zeros((12, 12), dtype=np.float32)
-        for i in range(12):
-            delta = self.edges_ori_delta[i]
-            Eo[i, i] = -1.0 if delta % 2 else 1.0
-
-        return block_diag(Cp, Ep, Co, Eo)  # (228, 228)
-
-    def move_matrix(self) -> np.ndarray:
-        """
-        群表示
-        move_matrix:[ cp (64) | ep (144) | co (8 complex) | eo (12) ]
-        """
-
-        def perm_matrix(move_perm: np.ndarray) -> np.ndarray:
-            """
-            perm: new_pos = perm[old_pos]
-            返回矩阵 M 使得 new_P = M @ P
-            """
-            n = len(move_perm)
-            M = np.zeros((n, n), dtype=np.float32)
-            for old in range(n):
-                new = move_perm[old]
-                M[new, old] = 1.0
-
-            return M
-
-        M_row_corner = perm_matrix(self.corners_perm)
-        M_row_edge = perm_matrix(self.edges_perm)
-
-        M_cp = np.kron(M_row_corner, np.eye(8))
-        M_ep = np.kron(M_row_edge, np.eye(12))
-
-        omega = np.exp(2j * np.pi / 3)
-        M_co = np.zeros((8, 8), dtype=np.complex64)  # corner_ori_matrix
-        for old in range(8):
-            new = self.corners_perm[old]
-            delta = self.corners_ori_delta[old]
-            M_co[new, old] = omega ** delta  # 乘以一个对角复数矩阵
-
-        M_eo = np.zeros((12, 12), dtype=np.float32)  # edge_ori_matrix
-        for old in range(12):
-            new = self.edges_perm[old]
-            delta = self.edges_ori_delta[old]
-            sign = -1.0 if delta % 2 else 1.0
-            M_eo[new, old] = sign
-
-        return block_diag(M_cp, M_ep, M_co, M_eo)  # (228, 228)
 
     @class_property('PRIM_MOVES')
     def prim_moves(cls) -> dict[tuple, 'CubieMove']:
@@ -1162,16 +1182,19 @@ class CubieMove:
 
     @class_property('PHASE2_MOVES')
     def phase2_moves(cls) -> dict[tuple, 'Phase2Action']:
-        '''⟨ U, D, L², R², F², B² ⟩'''
+        '''⟨ U, D, L², R², F², B² ⟩ 10
+        Phase2 的生成元应该在结构上“自洽闭合”
+        '''
         moves: dict[tuple, CubieMove] = {}  # 去重
         for (axis, side, direction), m in cls.prim_moves.items():
+            # if all(d == 0 for d in m.corners_ori_delta) and all(d == 0 for d in m.edges_ori_delta):
+            # if m.inverse().is_primitive() # inverse 本身就应该在 primitive 集里
             if abs(side) != 1:  # 只允许外层
                 continue
             if axis == 1:  # U / D 的 ±90°
                 moves[(axis, side, direction)] = m
-            else:  # X/Z 轴,R/L/F/B，只取 180°
-                if direction == 2:
-                    moves[(axis, side, direction)] = m
+            elif direction == 2:  # X/Z 轴,R/L/F/B，只取 180°
+                moves[(axis, side, direction)] = m
                 # if direction == 1:  # 只生成一次，避免重复
                 #     key = (axis, side, 2)
                 #     moves[key] =  m.compose(m)  # 合并了对称的 180°
@@ -1182,6 +1205,15 @@ class CubieMove:
     def edge_parity_delta(self) -> int:
         # edge permutation parity_effect 奇偶 0 or 1
         return CubeBase.permutation_parity(self.edges_perm)
+
+    @property
+    def orientation_distance(self):
+        """
+        计算 move 的 orientation distance
+        """
+        d_corner = sum(abs(x) for x in self.corners_ori_delta)
+        d_edge = sum(abs(x) for x in self.edges_ori_delta)
+        return d_corner + d_edge
 
     @staticmethod
     def build_move_part(perm0, ori0, perm1, ori1, mod: int) -> tuple[np.ndarray, np.ndarray]:
@@ -1272,6 +1304,142 @@ class CubieMove:
                     queue.append(nxt)
 
         return dist
+
+
+class SlowDynamics:
+    """
+    构造一个 压缩谱结构,有限群表示在随机生成元上的谱分层,群的不可约表示结构,完整继承群结构,同时近似随机微动力学,随机游走算子的谱分层
+    平均对称性主导的慢动力学,本质就是 orientation diffusion operator
+    群上 Fourier/谱方法降维 + 慢子空间 heuristic
+    从 228 → 100 维慢子空间 k/9,1−k/9  精确 k/9 层级 + 100 维实用模型
+    谱分层结构 (A−1I)24(A−97I)44(A−32I)8(A−95I)96(A−31I)32=0,(A−1)(A−7/9)(A−2/3)(A−5/9)(A−1/3)Q(A)=0
+    λ 层不是数值现象，而是代数定理
+    | λ   | 维度 | 含义     |
+    | --- | -- | ------ |
+    | 1   | 24 | 守恒宏观变量 |
+    | 7/9 | 44 | 慢模态    |
+    | 2/3 | 32 | 次慢     |
+    | 5/9 | 96 | 中速     |
+    | 1/3 | 32 | 快速衰减   |
+    -----------------
+    fast chaotic bulk/Hamming random walk restricted to cube group constraints
+    |λ| ≤ 5/9
+    λ ≥ 2/3 24 + 44 + 32 = 100
+    丢弃 128 ∣λ∣≤5/9
+    先进入 slow manifold,再在 fast manifold 混合,fast dynamics 接近 optimal expander
+    9 = 3² λ = 1 - k/9 k ∈ {0,2,3,4,6} orientation distance shells
+    80% 的能量在快子空间
+    Amicro 属于一个 5 维交换代数，是已经对称化的算子,Phase-1 mixing 本质上只有 5 个时间尺度
+    在 228 维空间上有 5 个特征值,1 个 trivial irreps + 1 个 204 维可约表示（其中 76 维慢部分有准对称，128 维快部分无对称)
+    只有 λ=1 层是真正的群不变子空间,其余 4 层只是“平均算子”的谱分层
+    只有 24 维真正对称性，其余结构是统计对称性（statistical symmetry）。
+    100 维 Markov 主特征空间 ρ(s) V_slow ⊆ V_slow + O(0.45) 泄漏，但泄漏快速衰减(生成元逃逸误差 ≈0.42–0.46），但它是 Markov 动力学的“近不变子空间”
+    能以极高精度（T=100 相对误差 < 6×10^{-7}）近似状态演化
+    slow/fast 分解和 C₃ 子表示强相关
+    谱分层 + gap 快层谱半径 = 5/9   fast 层几乎是正规算子,指数收缩
+    tmix ≈ log(1e6)/log(9/5) ≈ 23,20 步基本只剩 λ₂
+    平均对称性主导、瞬时不对称(spectral dominance + transient leakage)
+    一个具有统计谱分层（statistical spectral stratification）的非交换表示，平均算符下出现 5 个高度退化的谱层，单个生成元导致强跨层混合，但慢动力学表现出极高的可计算性和稳定性。
+    """
+
+    def __init__(self, threshold: float = 2 / 3, tol=1e-8):
+        assert np.allclose(self.A_micro, self.A_micro.T, rtol=tol, atol=tol), "矩阵不对称"
+        self.w, self.V = np.linalg.eigh(self.A_micro)  # 对称特征分解
+        idx = np.argsort(-self.w)
+        self.w = self.w[idx]
+        self.V = self.V[:, idx]
+        mask_const = np.abs(self.w - 1.0) < tol  # 提取守恒子空间
+        # dim_const=np.sum(mask_const)
+        self.V_const = self.V[:, mask_const]  # (228, 24)
+        mask_slow = self.w >= threshold - tol
+        self.V_slow = self.V[:, mask_slow]  # 228 × 100 投影矩阵  舍弃128 维
+        self.w_slow = self.w[mask_slow]  # 100
+        self.dim_slow = len(self.w_slow)
+        # 预缓存慢空间表示,压缩算子
+        self.rho_slow = {k: self.V_slow.T @ rho @ self.V_slow
+                         for k, rho in self.rho_moves.items()}
+        # unique, counts = np.unique(np.round(self.w, 6), return_counts=True)  # 防数值误差
+        # proj_slow = self.V_slow @ self.V_slow.T.conj()  # (228,228) 慢投影器
+        # proj_fast = np.eye(self.V_slow.shape[0]) - proj_slow
+        # A_fast = proj_fast @ A_micro @ proj_fast
+        # eigvals = np.linalg.eigvals(A_fast)
+        # rho_f = np.max(np.abs(eigvals) # 快层谱半径 5/9
+        # t_mix = np.log(1 / 1e-6) / (-np.log(rho_f)) # 23.5043
+
+    @class_property('PRIM_RHO_MOVES')
+    def rho_moves(cls) -> dict[tuple, np.ndarray]:
+        return {k: mv.rho() for k, mv in CubieMove.prim_moves.items()}
+
+    @class_property('RHO_MICRO')
+    def A_micro(cls) -> np.ndarray:
+        """
+        生成元平均算子,反映群作用的整体能量层级
+        A_real = np.block([
+        [A_micro.real, -A_micro.imag],
+        [A_micro.imag, A_micro.real]
+        ])  # (456, 456) 实矩阵表示复线性变换
+        """
+        rho_moves = list(cls.rho_moves.values())
+        return sum(rho_moves) / len(rho_moves)  # 微时间算子
+
+    @classmethod
+    def exact(cls, vec, T) -> np.ndarray:
+        """
+        真实 T 步
+        """
+        return np.linalg.matrix_power(cls.A_micro, T) @ vec  # xT_exact
+
+    def project(self, vec):
+        """
+        投影到慢子空间,把原 228 维状态压缩到 100 维慢子空间
+        """
+        return self.V_slow.T @ vec  # 返回 (100,) 慢坐标 z0
+
+    def lift(self, z):
+        return (self.V_slow @ z).real  # (228,) 还原回原空间,xT_approx
+
+    def evolve_micro(self, z, T):
+        """
+        zT 微时间指数预测,在慢子空间做 A_micro^T
+        """
+        return z * (self.w_slow ** T)  # (100,) 在慢空间演化 预测 T 步 指数衰减
+
+    def predict(self, state_vector, T: int):
+        z0 = self.project(state_vector)  # (100,) 投影到慢子空间
+        zT = self.evolve_micro(z0, T)
+        xT_approx = self.V_slow @ zT
+        # xT_approx += self.V_const @ (self.V_const.T @ state_vector)#保持守恒量
+        return xT_approx.real  # (228,) 返回近似状态向量,np.real(zT)
+
+    def heuristic(self, x, y, norm_type='l2'):
+        """计算 Representation-Aware 距离,
+        Representation Discovery using Harmonic Analysis 系列明确提出用慢特征向量做 heuristic，忽略快模式，提升搜索效率"""
+        delta = x - y
+        z_delta = self.project(delta)  # (100,)
+        if norm_type == 'l2':
+            return np.linalg.norm(z_delta)
+        elif norm_type == 'l1':
+            return np.sum(np.abs(z_delta))
+        else:
+            raise ValueError("未知范数类型")
+
+    def group_action(self, rho_m, z):
+        """群元素 ρ(m) 在慢空间的作用,自动继承群乘法：ρ(gh) = ρ(g) ρ(h)"""
+        rho_slow = self.V_slow.T @ rho_m @ self.V_slow  # (100,100) 约化表示
+        return rho_slow @ z
+
+    def apply_move(self, move_key: tuple, z):
+        return self.rho_slow[move_key] @ z
+
+    def predict_path(self, state_vector, moves: list[tuple] = None, micro_steps=0):
+        """路径预测 慢坐标,混合动力学"""
+        z = self.project(state_vector)
+        if moves is not None:  # 离散群作用,应用 moves 序列
+            for m in moves:
+                z = self.apply_move(m, z)  # group_action
+        if micro_steps > 0:  # 微时间指数预测,长演化
+            z = self.evolve_micro(z, micro_steps)
+        return z
 
 
 @dataclass(frozen=True)
@@ -1699,8 +1867,7 @@ class Phase15Coord:
     Phase1.5 再 quotient 掉 slice 内排列与角块内部排列，只保留 coset 与 edge parity
     在不限制 move 集的情况下，仅通过目标约束，把状态推进到 Phase-2 可达子空间
     状态空间大小 4! × 70 × 2 = 560 状态,压缩状态,纯净的因果子空间 → Δpotential
-    最容易看到张力、稳定结构和涌现模式
-    不可违背的先验法则（群论）,可涌现的经验规律（策略、启发）
+    不可违背的先验法则（群论）,可涌现的经验规律（策略、启发）,看张力、稳定结构和涌现模式
 
     对称性破缺（Symmetry Breaking）
     魔方世界有极强对称性：面对称/颜色置换/全局旋转等价
@@ -1711,6 +1878,9 @@ class Phase15Coord:
     = G / (Ori × SliceMembership)
     = 纯 coset + parity
 
+    quotient 坐标不是正规子群商，所以不存在真正群同态坐标，同一个坐标可能对应两个真实群轨道。
+    整体群要求：corner_parity=edge_parity  slice_parity:internal_permutation_parity
+
     Move set = 原群生成元（不裁剪）
     Goal = 收缩到 Phase-2 子群
     Prune table = exact distance to target subgroup（admissible）
@@ -1718,11 +1888,11 @@ class Phase15Coord:
     """
     slice_perm: int  # UD-slice 内 4 条 edge 的排列 4! = 24 slice_perm ∈ [0,24) critic label
     corner_coset: int  # U/D 层 corner membership quotient 掉 U-layer + D-layer 内部的排列 8! / (4!·4!) = C(8,4)  ∈ [0,70)
-    parity: int  # Z2 守恒 0 / 1,edge_parity' = edge_parity XOR Δ(m) / edge_parity XOR corner_parity
+    parity: int  # Z2 守恒 0 / 1,来自真实 edge_parity,edge_parity' = edge_parity XOR Δ(m) / edge_parity XOR corner_parity
 
     @property
     def index(self) -> int:
-        """index=slice∗70∗2+corner∗2+parity"""
+        """index=slice∗70∗2+corner∗2+parity 只存索引，丢失一半的连通性"""
         N_CORNER = 70
         return ((self.slice_perm * N_CORNER + self.corner_coset) << 1) | self.parity
 
@@ -1748,7 +1918,9 @@ class Phase15Coord:
 
     @classmethod
     def project(cls, s: CubieState) -> "Phase15Coord":
-        """ encode 状态空间裁剪  在 Phase-2 中，corner parity 与 edge parity 必须匹配"""
+        """ encode 状态空间裁剪  在 Phase-2 中，corner parity 与 edge parity 必须匹配,
+        必须通过真实状态回溯（cubie Lift）来维持结构的正确性
+        """
         # 1. slice_perm（Phase1 已保证 membership）
         slice_perm = CubieState.encode_perm_ud_slice(s.edges_perm.tolist())  # 0..23
         # 2. corner_coset（U 层是哪 4 个 corner）
@@ -1840,7 +2012,12 @@ class Phase15Action(QuotientMove):
     """
     slice_perm_map: np.ndarray  # shape (24,)
     corner_coset_map: np.ndarray  # shape (70,)
+
     edge_parity_map: np.ndarray  # shape (2,)
+    # delta:int  # ∈ {0,1}
+    # parity=1 時要用的扭曲映射（即 φ 作用後的映射）
+    slice_perm_map_phi: np.ndarray
+    corner_coset_map_phi: np.ndarray
 
     def act(self, s: CubieState) -> tuple[CubieState, Phase15Coord]:
         """
@@ -1852,15 +2029,22 @@ class Phase15Action(QuotientMove):
         return state, coord
 
     def act_index(self, idx: int) -> int:
-        """投影后的伪动作 不保证可达性 不能用于搜索状态转移"""
+        """投影后的伪动作 不保证可达性 不能用于搜索状态转移，不是子群/正规商群/直积,它是 index-2 扩张/是半直积"""
         c = Phase15Coord.from_index(idx)
+        if c.parity == 0:
+            slice_map = self.slice_perm_map
+            corner_map = self.corner_coset_map
+        else:  # parity=1 → 套用 φ 扭曲
+            slice_map = self.slice_perm_map_phi
+            corner_map = self.corner_coset_map_phi
+
         next = Phase15Coord(
-            slice_perm=int(self.slice_perm_map[c.slice_perm]),
-            corner_coset=int(self.corner_coset_map[c.corner_coset]),
+            slice_perm=int(slice_map[c.slice_perm]),
+            corner_coset=int(corner_map[c.corner_coset]),
             parity=int(self.edge_parity_map[c.parity]),
         )
-        assert 0 <= next.corner_coset < 70
-        assert 0 <= next.slice_perm < 24
+        assert 0 <= next.corner_coset < 70, f"slice out of range: {next.slice_perm}"
+        assert 0 <= next.slice_perm < 24, f"corner coset out of range: {next.corner_coset}"
         assert next.parity in (0, 1)
         return next.index
 
@@ -1893,11 +2077,55 @@ class Phase15Action(QuotientMove):
         for p in (0, 1):
             edge_parity_map[p] = p ^ delta
 
+        t = CubieMove.prim_moves[(0, -1, 2)]  # (0, 1, 2)/(1, -1, 2)/(1, 1, 2)/(2, -1, 2)/(2, 1, 2)
+        assert t.compose(t) == CubieMove.identity()
+        t_inv = t.inverse()
+        phi_h = t @ m @ t_inv  # conjugated  φ(h) = T ∘ h ∘ T
+
+        slice_perm_map_phi = np.zeros(24, dtype=np.int8)
+        corner_coset_map_phi = np.zeros(70, dtype=np.int16)
+        for i in range(24):
+            s = solved.with_(edges_perm=CubieState.create_ud_slice_perm(i))
+            s2 = phi_h.act(s)
+            slice_perm_map_phi[i] = CubieState.encode_perm_ud_slice(s2.edges_perm.tolist())
+
+        for i in range(70):
+            s = solved.with_(corners_perm=CubieState.canonical_corner_coset(i))
+            s2 = phi_h.act(s)
+            corner_coset_map_phi[i] = CubieState.encode_corner_coset(s2.corners_perm.tolist())
+
         return cls(
             slice_perm_map=slice_perm_map,
             corner_coset_map=corner_coset_map,
             edge_parity_map=edge_parity_map,
+            slice_perm_map_phi=slice_perm_map_phi,
+            corner_coset_map_phi=corner_coset_map_phi,
             cubie_move=m
+        )
+
+    def compose(self, other: "Phase15Action") -> "Phase15Action":
+        new_edge_parity_map = np.zeros(2, dtype=np.int8)  # 新 parity delta
+        for p in (0, 1):
+            new_edge_parity_map[p] = self.edge_parity_map[p] ^ other.edge_parity_map[p]
+
+        # H 部分 map，根据 self 的 parity 决定是否要 φ twist
+        if self.edge_parity_map[1] == 1:  # parity=1 时 twist
+            slice_map = self.slice_perm_map_phi[other.slice_perm_map]
+            corner_map = self.corner_coset_map_phi[other.corner_coset_map]
+        else:
+            slice_map = self.slice_perm_map[other.slice_perm_map]
+            corner_map = self.corner_coset_map[other.corner_coset_map]
+
+        slice_perm_map_phi = self.slice_perm_map_phi[other.slice_perm_map_phi]
+        corner_coset_map_phi = self.corner_coset_map_phi[other.corner_coset_map_phi]
+
+        return Phase15Action(
+            slice_perm_map=slice_map,
+            corner_coset_map=corner_map,
+            edge_parity_map=new_edge_parity_map,
+            slice_perm_map_phi=slice_perm_map_phi,
+            corner_coset_map_phi=corner_coset_map_phi,
+            cubie_move=self.cubie_move.compose(other.cubie_move)
         )
 
 
@@ -3116,20 +3344,62 @@ class CubieBase(CubeBase):
         return sm, state
 
     @staticmethod
-    def generate_cubie(max_depth: int = 50) -> CubieState:
+    def generate_group(gens: list, max_depth: int = 10, max_groups: int = 1000):
+        start = CubieMove.identity()
+        queue = deque([start])
+        group = {start: 0}
+
+        while queue:
+            current = queue.popleft()
+            d = group[current]
+            if d >= max_depth:
+                continue
+
+            for g in gens:
+                new = g.compose(current)  # current.multiply(g)
+                if new not in group:
+                    group[new] = d + 1
+                    queue.append(new)
+                    if len(group) >= max_groups:
+                        return group
+        return group
+
+    @staticmethod
+    def random_walk(length: int = 50) -> CubieMove:
+        moves = list(CubieMove.prim_moves.values())
+        current = CubieMove.identity()
+        for _ in range(length):
+            m = random.choice(moves)
+            current = m.compose(current)
+        return current
+
+    @staticmethod
+    def generate_cubie(length: int = 50) -> CubieState:
         """
         生成一个随机打乱的 CubieState,使用 act_left 模拟物理转动顺序，更符合直观和 sticker 模型
         phase0
         """
         moves = list(CubieMove.prim_moves.values())
         state = CubieState.solved()
-        # 连续应用随机 move,random.sample(moves, max_depth)
-        for _ in range(max_depth):
+        # 连续应用随机 move,random.sample(moves, length)
+        for _ in range(length):
             m = random.choice(moves)
             state = m.act_left(state)  # act
 
         assert state.is_solvable()
         return state
+
+    @staticmethod
+    def generate_cubie_rho(max_depth: int = 27, sigma: float = 1.0) -> np.ndarray:
+        """生成若干随机线性组合,可控标准差 combination"""
+        moves = list(CubieMove.prim_moves.values())
+        coeffs = np.random.normal(loc=0.0, scale=sigma, size=max_depth)
+        selected_moves = random.choices(moves, k=max_depth)
+        rho_zero = moves[0].rho()
+        A = np.zeros_like(rho_zero, dtype=rho_zero.dtype)
+        for c, mv in zip(coeffs, selected_moves):
+            A += c * mv.rho()  # np.random.randn()
+        return A  # (228, 228)
 
     @classmethod
     def generate_phase1_cubie(cls, max_depth: int = 20) -> CubieState:
@@ -3159,7 +3429,7 @@ class CubieBase(CubeBase):
         cubie = cubie_phase1.clone()
         depth = np.random.randint(1, max_depth + 1)
         for _ in range(depth):
-            m = np.random.choice(moves)
+            m = np.random.choice(moves)  # p=weights
             cubie = m.replay(cubie)
 
         # 确保 Phase1 方向仍然正确
@@ -3169,7 +3439,7 @@ class CubieBase(CubeBase):
 
     @classmethod
     def generate_phase15_dataset(cls, max_depth: int = 10, num_starting_points: int = 20,
-                                 num_samples: int = 5000) -> list:
+                                 num_samples: int = 5000, as_key: bool = False, start_random: bool = False) -> list:
         ''''
         Phase15Coord 只是 Phase-1.5 子群的投影，信息是丢失的，必须保留 cubie
         随机游走采样，单步转移（single-step transition）
@@ -3182,15 +3452,18 @@ class CubieBase(CubeBase):
         dataset = []
         for _ in range(num_samples):
             cubie_phase1 = np.random.choice(starting_pool).clone()  # 从池子里随机选一个起点
-            cubie_phase15 = cls.generate_phase15_cubie(cubie_phase1, max_depth=8)  # 随机打乱 Phase-1 状态
-            cubie = cubie_phase15.clone()
+            if start_random:
+                cubie_phase15 = cls.generate_phase15_cubie(cubie_phase1, max_depth=8)  # 随机打乱 Phase-1 状态
+                cubie = cubie_phase15.clone()
+            else:  # 从 phase1_solved 解出发
+                cubie = cubie_phase1.clone()
             coord = Phase15Coord.project(cubie)
-            # state = coord.embedding()
+            # state = coord.embedding() cubie.vec
             # score = coord.heuristic()
             # cid = coord.index
             depth = np.random.randint(1, max_depth + 1)
             for step in range(depth):
-                move_id = np.random.choice(range(len(MOVE_IDX)))  # 18
+                move_id = random.choice(range(len(MOVE_IDX)))  # 18 np.
                 m_k = MOVE_IDX[move_id]
                 m = PHASE15_MOVES[m_k]
                 next_cubie, next_coord = m.act(cubie)
@@ -3200,6 +3473,11 @@ class CubieBase(CubeBase):
                                 ))  # step 轨迹内部的进度标记,保留起点信息,部分 move 可以偶然修复 next_cubie.is_phase1_solved()
                 coord = next_coord
                 cubie = next_cubie
+
+        if as_key:
+            dataset = [(d[0].key, d[1], d[2].key,
+                        d[3].key, d[4].key,
+                        d[5].key, d[6]) for d in dataset]
 
         return dataset
 
@@ -3806,6 +4084,8 @@ if __name__ == "__main__":
 
     s: CubieState = CubieState.solved()  # cube.cubie_state(cube.solved)
     M = CubieMove.from_rotation(1, 1, 1)
+    M2 = CubieMove.from_rotation(1, 1, 2)
+    M_ = CubieMove.from_rotation(1, 1, -1)
     I = CubieMove.identity()
 
     # assert m.compose(m.inverse()) == I ,f'{m},{m.inverse()}'
@@ -3814,24 +4094,47 @@ if __name__ == "__main__":
     assert I.compose(M) == M
     assert M.compose(M.inverse()) == I, f'{M},{M.inverse()}'
     assert M.inverse().compose(M) == I
-    Mg = I.move_matrix()
+    assert M.compose(M_) == I
+    assert M.compose(M) == M2
+    assert M_.compose(M_) == M2
+    assert M.inverse() == M_
+
+    Sg = s.vec
+    assert Sg.dtype == np.complex64
+
+    Mg = I.matrix()
     print(Mg.shape)  # (228, 228)
-    eigvals = np.linalg.eigvals(Mg)
+    eigvals = np.linalg.eigvals(Mg)  # 谱分析
     print(np.unique(np.round(eigvals, 6)))  # [1.+0.j]
 
-    Mg = I.embedding()
-    print(Mg.shape)  # (228, 228)
-    eigvals = np.linalg.eigvals(Mg)
+    Mh = M.matrix()  # move_matrix
+    Mgh = I.compose(M).matrix()
+    assert np.allclose(Mg @ Mh, Mgh)  # Mg @ Mh == Mgh
+    Sgh = M.act(s).vec
+    assert np.allclose(Sg @ Mh, Sgh)  # new_state_vec = old_state_vec @ M
+    assert np.allclose(Mh @ Mh.T.conj(), Mg)  # 共轭转置矩阵，在矩阵是酉矩阵（或实正交矩阵）时等同于逆矩阵
+    assert np.allclose(
+        np.linalg.norm(Sg @ Mh),
+        np.linalg.norm(Sg)
+    )
+
+    I_state = I.rho()
+    assert np.allclose(I_state, np.eye(228))
+
+    print(I_state.shape)  # (228, 228)
+    eigvals = np.linalg.eigvals(I_state)
     print(np.unique(np.round(eigvals, 6)))  # [1.+0.j]
 
-    Mh = M.embedding()  # move_matrix
+    Mh = M.rho()
     print(np.trace(Mh))  # (148+0j)
-    Mgh = I.compose(M).embedding()
-    assert np.allclose(Mg @ Mh, Mgh)
-    assert np.allclose(Mh @ Mh.T.conj(), Mg)  # 单位性
-    assert np.allclose(M.inverse().embedding(), Mh.T.conj())
+    Mgh = I.compose(M).rho()
+    assert np.allclose(I_state @ Mh, Mgh)  # ρ(g)ρ(h)=ρ(gh)
 
-    for mv in CubieMove.prim_moves.values():
+    assert np.allclose(Mh @ Mh.T.conj(), I_state)  # 单位性,ρ(M)ρ(M)∗=I
+    assert np.allclose(M.inverse().rho(), M.rho().T.conj())  # 逆元 ρ(g−1)=ρ(g)∗
+    eigvals = np.linalg.eigvals(Mh - I_state)
+    print(np.unique(np.round(eigvals, 6)))  # [-2.-0.j -1.-1.j -1.+1.j  0.+0.j]
+    for i, (k, mv) in enumerate(CubieMove.prim_moves.items()):
         # ---------- 基本 act ----------
         s1 = mv.act(s)
         assert mv.act(s) == s1
@@ -3839,8 +4142,12 @@ if __name__ == "__main__":
         assert mv.convert().convert() == mv  # 反转左右作用 复原
         assert mv.convert().inverse() == mv.inverse().convert()
         s2 = mv.act_left(s)
+
         assert mv.convert().act(s) == s2
         assert mv.act(s) == mv.convert().act_left(s)
+
+        print(CubieMove.move_idx[i], mv.inverse().is_primitive())
+        print(k, mv.compose(mv) == CubieMove.identity())
 
         assert mv.compose(I) == mv and I.compose(mv) == mv
 
@@ -3861,24 +4168,48 @@ if __name__ == "__main__":
 
         assert mv.act(s).is_solvable()  # 所有 prim move 保持可解
 
-        Mh = mv.embedding()
-        Mgh = I.compose(mv).embedding()
-        assert np.allclose(Mg @ Mh, Mgh)
-        assert np.allclose(Mh @ Mh.T.conj(), Mg)  # 单位性
+        Ms = mv.rho()
+        Mgh = I.compose(mv).rho()
+        assert np.allclose(Mg @ Ms, Mgh)
+        assert np.allclose(Ms @ Ms.T.conj(), Mg)  # 单位性
+        assert np.allclose(Ms.T.conj() @ Ms, np.eye(228))
+        assert np.allclose(Ms @ Ms.T.conj(), np.eye(228))
 
-        print(np.trace(Mh))  # (148+0j)
+        assert np.allclose(Sg @ mv.matrix(), (mv.act(s)).vec)
+
+        assert np.allclose(mv.inverse().matrix(), mv.matrix().T.conj())
+
+        assert np.allclose(Sg @ mv.matrix(), s1.vec)
+
+        rank = np.linalg.matrix_rank(Ms - np.eye(228))
+        print(rank, np.trace(Ms))
         """
-        3 个共轭类
-        (148+0j)
-        (142+0j)
+        3 个共轭类,存在至少 3 个不同特征类型
+        (148+0j)  inverse().is_primitive()
+        (142+0j) 
         (134+0j)
         """
-        rank = np.linalg.matrix_rank(Mh - np.eye(228))
-        print(rank)
 
+        M12 = mv.compose(M).matrix()
+        assert np.allclose(mv.matrix() @ M.matrix(), M12)
+
+        g = mv
+        h = M
+        lhs = h.compose(g).compose(h.inverse()).matrix()
+        rhs = g.matrix()  # right action (row convention)
+        assert np.isclose(np.trace(lhs), np.trace(rhs))
 
         # eigvals = np.linalg.eigvals(Mh)
         # print(np.unique(np.round(eigvals, 6)))
+
+    all_moves = CubieMove.prim_moves().copy()
+    all_moves.update(CubieMove.slice_moves())
+    for mv in all_moves.values():
+        if np.allclose(mv.rho(), np.eye(228)):
+            assert mv == I
+
+    for i, a in enumerate(CubieMove.phase2_moves.values()):
+        print(i, a.cubie_move.inverse().is_primitive())
 
     I = CubieMove.identity()
     s = CubieState.solved()

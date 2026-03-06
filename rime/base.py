@@ -22,23 +22,27 @@ class IndexProxy(Mapping):
     def get(self, key, default=None):
         return self._data.get(key, default)
 
+    @property
+    def raw(self):
+        return self._data  # 直接访问,只读视图
+
     def __call__(self):
         return self
 
-    def __contains__(self, key):
+    def __contains__(self, key) -> bool:
         return key in self._data
 
     def __iter__(self):
         return iter(self._data)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._data)
 
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self._data})"
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._data!r})"
 
     def items(self):
-        return self._data.items()
+        return self._data.items()  # dict 方法透传
 
     def keys(self):
         return self._data.keys()
@@ -46,11 +50,23 @@ class IndexProxy(Mapping):
     def values(self):
         return self._data.values()
 
-    def index(self, key):
-        return self._data.index(key)
+    def update(self, **kwargs):
+        if isinstance(self._data, dict):
+            self._data.update(**kwargs)
+        else:
+            raise AttributeError("update() only for dict")
+
+    def index(self, value, start=0, end=None):
+        if isinstance(self._data, (list, tuple)):
+            return self._data.index(value, start, end)
+        raise AttributeError("index() only supported for list/tuple")
 
     def clear(self):
         self._data.clear()
+
+    def copy(self):
+        """返回原数据的浅拷贝"""
+        return self._data.copy() if hasattr(self._data, 'copy') else type(self._data)(self._data)
 
 
 class class_property:
@@ -134,7 +150,8 @@ class class_property:
                 setattr(cls, cache_name, value)
         print(f"类 {cls.__name__} 的属性已从 {prop_dir} 加载")
 
-#lru_cache
+
+# lru_cache
 class class_cache:
     def __init__(self, cache_name: str = None, key=None):
         self.cache_name = cache_name

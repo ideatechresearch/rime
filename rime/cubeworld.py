@@ -348,7 +348,7 @@ class FullLinearMove(nn.Module):
         return out.squeeze(-1)  # (B, D)
 
 
-def train_move_full(dataset, num_epochs=30, batch_size=128, use_coord=False):
+def train_move_full(dataset, num_epochs=30, batch_size=128, use_coord=False, use_vec=False):
     '''
     move 线性可学,在数据流形上精确拟合
     如果 coord 是 cubie 投影：可能 135 维实际只有 100 左右自由度
@@ -356,21 +356,28 @@ def train_move_full(dataset, num_epochs=30, batch_size=128, use_coord=False):
     coord 不是必须的。coord 只是 cubie 的一个投影。
     是否满足群闭合?
     '''
-    cubie_np = np.array([x[3].encode_state() for x in dataset])  # shape: (N, 40) cubie_encoding
-    coords_np = np.array([x[0].embedding() for x in dataset])  # shape: (N, embedding_dim)
-    next_cubie_np = np.array([x[4].encode_state() for x in dataset])
-    next_coords_np = np.array([x[2].embedding() for x in dataset])
 
+    if use_vec:  # if np.iscomplexobj(cubie_np_complex):
+        cubie_np = np.array([x[3].vec for x in dataset])  # shape: (N,228)
+        next_cubie_np = np.array([x[4].vec for x in dataset])
+        cubie_np = np.concatenate([cubie_np.real, cubie_np.imag], axis=1)
+        next_cubie_np = np.concatenate([next_cubie_np.real, next_cubie_np.imag], axis=1)
+    else:
+        cubie_np = np.array([x[3].encode_state() for x in dataset])  # shape: (N, 40) cubie_encoding
+        next_cubie_np = np.array([x[4].encode_state() for x in dataset])
+
+    input_np = cubie_np  # (N, 40) / (N,456)
+    output_np = next_cubie_np
     if use_coord:
+        coords_np = np.array([x[0].embedding() for x in dataset])  # shape: (N, embedding_dim)
+        next_coords_np = np.array([x[2].embedding() for x in dataset])
         input_np = np.concatenate([cubie_np, coords_np], axis=1)  # 135
         output_np = np.concatenate([next_cubie_np, next_coords_np], axis=1)  # (N, 135)
-    else:
-        input_np = cubie_np  # (N, 40)
-        output_np = next_cubie_np
 
-    states = torch.from_numpy(input_np).float()
-    moves = torch.tensor([x[1] for x in dataset], dtype=torch.long)
+    states = torch.from_numpy(input_np).float()  # to(torch.complex64) /nn.Linear 等默认不支持复数
     next_states = torch.from_numpy(output_np).float()
+
+    moves = torch.tensor([x[1] for x in dataset], dtype=torch.long)
 
     train_dataset = TensorDataset(states, moves, next_states)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -549,7 +556,7 @@ def train_move(dataset, num_epochs=30, rank=40, batch_size=128):
     # states_np = np.array([x[0].embedding() for x in dataset])  # shape: (N, embedding_dim)
     next_cubie_np = np.array([x[4].encode_state() for x in dataset])
     # next_states_np = np.array([x[2].embedding() for x in dataset])
-    moves_np = np.array([CubieMove.prim_embedding(move_id=x[1]) for x in dataset])
+    moves_np = np.array([CubieMove.embedding(move_id=x[1]) for x in dataset])
     # input_np = np.concatenate([states_np, cubie_np], axis=1)
 
     states = torch.from_numpy(cubie_np).float()
@@ -885,16 +892,28 @@ if __name__ == "__main__":
     import joblib
     import matplotlib.pyplot as plt
 
-    gpd = False
+    gpd = True
+    as_key = True
+    path = 'data/phase15_dataset_by_key.pkl' if as_key else 'data/phase15_dataset.pkl'
     if gpd:
-        dataset = cube.generate_phase15_dataset(max_depth=10, num_starting_points=50, num_samples=50000)
-        joblib.dump(dataset, 'data/phase15_dataset.pkl')
+        # dataset = cube.generate_phase15_dataset(max_depth=10, num_starting_points=50, num_samples=50000, as_key=as_key)
+        dataset = cube.generate_phase15_dataset(max_depth=16, num_starting_points=100, num_samples=20000, as_key=as_key,
+                                                start_random=False)
+        joblib.dump(dataset, path)
     else:
-        dataset = joblib.load('data/phase15_dataset.pkl')
-    print(len(dataset), sum([x[4].is_phase1_solved() for x in dataset]),
-          sum([x[3].is_phase1_solved() for x in dataset]))  # 275731 59371 102499
+        dataset = joblib.load(path)
+
+    if as_key:
+        dataset = [(Phase15Coord(*d[0]), d[1], Phase15Coord(*d[2]),
+                    CubieState.from_key(d[3]), CubieState.from_key(d[4]),
+                    CubieState.from_key(d[5]), d[6]
+                    ) for d in dataset]
+
+    print(len(dataset),
+          sum([x[3].is_phase1_solved() for x in dataset]), sum([x[4].is_phase1_solved() for x in dataset]),
+          sum([x[4].is_phase2_ready() for x in dataset]))  # 275731 102499 59371 168 / 169655 44065 25853 311
     total_ready = {d[4].key: d[4] for d in dataset if d[4].is_phase2_ready()}
-    print(f"unique phase2 ready:{len(total_ready)}")
+    print(f"unique phase2 ready:{len(total_ready)}")  # 43/24
 
     from collections import defaultdict
 
@@ -955,10 +974,19 @@ if __name__ == "__main__":
     ...
 
     """
+    # from sklearn.decomposition import PCA
+    # from sklearn.manifold import TSNE
+    # pca = PCA(n_components=2)
+    # X_pca= pca.fit_transform(X)
+    # next_cubie_np = np.array([x[4].vec for x in dataset])
+    # X = np.concatenate([next_cubie_np.real, next_cubie_np.imag], axis=1)
+    # depths = [x[6] for x in dataset]
+
 
     dataset = [x for x in dataset if x[4].is_phase1_solved()]  # 只看 next_cubie
+
     # 数据驱动群表示构造
-    model, train_losses, train_accuracy = train_move_full(dataset, num_epochs=30, use_coord=False)
+    model, train_losses, train_accuracy = train_move_full(dataset, num_epochs=30, use_coord=False, use_vec=False)
     mats = []
     for i in range(len(model.move_matrix)):
         W = model.move_matrix[i].detach().cpu().numpy()
