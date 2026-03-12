@@ -358,13 +358,13 @@ def train_move_full(dataset, num_epochs=30, batch_size=128, use_coord=False, use
     '''
 
     if use_vec:  # if np.iscomplexobj(cubie_np_complex):
-        cubie_np = np.array([x[3].vec for x in dataset])  # shape: (N,228)
-        next_cubie_np = np.array([x[4].vec for x in dataset])
+        cubie_np = np.array([x[3].vector for x in dataset])  # shape: (N,228)
+        next_cubie_np = np.array([x[4].vector for x in dataset])
         cubie_np = np.concatenate([cubie_np.real, cubie_np.imag], axis=1)
         next_cubie_np = np.concatenate([next_cubie_np.real, next_cubie_np.imag], axis=1)
     else:
-        cubie_np = np.array([x[3].encode_state() for x in dataset])  # shape: (N, 40) cubie_encoding
-        next_cubie_np = np.array([x[4].encode_state() for x in dataset])
+        cubie_np = np.array([x[3].state() for x in dataset])  # shape: (N, 40) cubie_encoding
+        next_cubie_np = np.array([x[4].state() for x in dataset])
 
     input_np = cubie_np  # (N, 40) / (N,456)
     output_np = next_cubie_np
@@ -552,9 +552,9 @@ class StructuredMoveLayer(nn.Module):
 
 
 def train_move(dataset, num_epochs=30, rank=40, batch_size=128):
-    cubie_np = np.array([x[3].encode_state() for x in dataset])  # shape: (N, 40)
+    cubie_np = np.array([x[3].state() for x in dataset])  # shape: (N, 40)
     # states_np = np.array([x[0].embedding() for x in dataset])  # shape: (N, embedding_dim)
-    next_cubie_np = np.array([x[4].encode_state() for x in dataset])
+    next_cubie_np = np.array([x[4].state() for x in dataset])
     # next_states_np = np.array([x[2].embedding() for x in dataset])
     moves_np = np.array([CubieMove.embedding(move_id=x[1]) for x in dataset])
     # input_np = np.concatenate([states_np, cubie_np], axis=1)
@@ -941,7 +941,7 @@ if __name__ == "__main__":
         stats[key] += 1
 
     for k, v in sorted(stats.items()):
-        print(f"move {k[0]}:{CubieMove.move_idx[k[0]]}, cubie/next_phase1={(k[1], k[2])} → {v} 次")
+        print(f"move {k[0]}:{CubieMove.basic_generators[k[0]]}, cubie/next_phase1={(k[1], k[2])} → {v} 次")
 
     """
     总 group 数量 (state.key + move_id): 261447
@@ -978,7 +978,7 @@ if __name__ == "__main__":
     # from sklearn.manifold import TSNE
     # pca = PCA(n_components=2)
     # X_pca= pca.fit_transform(X)
-    # next_cubie_np = np.array([x[4].vec for x in dataset])
+    # next_cubie_np = np.array([x[4].vector for x in dataset])
     # X = np.concatenate([next_cubie_np.real, next_cubie_np.imag], axis=1)
     # depths = [x[6] for x in dataset]
 

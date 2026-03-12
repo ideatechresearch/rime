@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from rime.base import class_property, class_cache, chainable_method, class_status
 import numpy as np
 import random, math
@@ -109,9 +110,7 @@ class CubeBase:
         """纯几何 / move 定义（无状态）"""
         self.n = n
         self.solved_idx = np.arange(6 * n * n, dtype=np.uint32).reshape(6, n, n)
-        self.solved = np.zeros((6, n, n), dtype=np.uint8)
-        for f in range(6):
-            self.solved[f, :, :] = f
+        self.solved = self.solved(n)
         self.SOLVED_CORNERS_MAP = self.solved_corners_map()
         self.SOLVED_EDGES_MAP = self.solved_edges_map()
 
@@ -128,6 +127,13 @@ class CubeBase:
         """颜色视图"""
         n = state_idx.shape[1]
         return (state_idx // (n * n)).astype(np.uint8)
+
+    @classmethod
+    def solved(cls, n: int) -> np.ndarray:
+        solved = np.zeros((6, n, n), dtype=np.uint8)
+        for f in range(6):
+            solved[f, :, :] = f
+        return solved
 
     def is_solved(self, state: np.ndarray) -> bool:
         return bool(np.array_equal(state, self.solved))  # not (state ^ self.solved).any()
@@ -211,7 +217,7 @@ class CubeBase:
         slot 0 为 reference （基准面）
         """
         solved = self.get_corners(self.solved)  # (8, 3) np.sort(, axis=1)
-        return {frozenset(c): (pid, c[0]) for pid, c in enumerate(solved)}
+        return {frozenset(c): (pid, c) for pid, c in enumerate(solved)}
 
     def corner_ids_ori(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -225,8 +231,15 @@ class CubeBase:
         for i, c in enumerate(corners):
             pid, ref = self.SOLVED_CORNERS_MAP[frozenset(c)]
             perm[i] = pid
-            ori_raw = list(c).index(ref)  # 原始索引：0/1/2
-            ori[i] = (-ori_raw) % 3  # np.roll(c, -k),list(solved[pid]).index(ref)-ori_raw
+            for twist in range(3):
+                rolled = np.roll(ref, -twist)
+                if np.array_equal(rolled, c):
+                    ori[i] = twist
+                    break
+            else:
+                ori_raw = list(c).index(ref[0])  # 原始索引：0/1/2
+                ori[i] = (-ori_raw) % 3
+                print(f"{pid}:No matching twist found")
 
         # ori = (ori - ori[0]) % 3  # 全局 orientation gauge fix
         ori[-1] = (-ori[:-1].sum()) % 3  # 把 orientation 投影到合法子空间,修正最后一个角方向
@@ -321,6 +334,7 @@ class CubeBase:
     @staticmethod
     def is_inverse(path: list[tuple], axis: int, layer: int, direction: int) -> bool:
         """
+        is_redundant
         禁止与上一个动作在同一面（axis+layer）上连续转动且总效果为 0 mod 4
         两个动作加起来等价于什么都没做
         """
@@ -1342,6 +1356,181 @@ class CubeBase:
 
                     return face, new_r, new_c
         return None
+
+
+@dataclass(frozen=True)
+class ActionToken:
+    axis: int
+    layer: int  # layer=side*mid
+    direction: int
+
+    @property
+    def key(self) -> tuple:
+        return self.axis, self.layer, self.direction
+
+    def invert(self) -> 'ActionToken':
+        return ActionToken(axis=self.axis, layer=self.layer, direction=-self.direction)
+
+    @classmethod
+    def identity(cls) -> "ActionToken":
+        return cls(0, 0, 0)
+
+    @classmethod
+    def from_path(cls, path: list[tuple] | tuple) -> list['ActionToken']:
+        """从三元组快速创建"""
+        if not path:
+            return [ActionToken.identity()]
+        if isinstance(path, tuple):
+            return [cls(*path)]
+        return [cls(*t) for t in path]
+
+    @class_cache('BASIC_MOVES', key=lambda n=3: n)
+    @classmethod
+    def basic_generators(cls, n: int = 3) -> list['ActionToken']:
+        """基础生成元,逻辑层（axis, layer, direction）与几何层解耦"""
+        center_layers = CubeBase.center_layers_list(n)
+        moves = []
+        for axis in range(3):
+            for layer in center_layers:
+                for direction in (-1, 1, 2):  # direction 只用 ±1，2 步可视为两步重复
+                    moves.append(cls(axis, layer, direction))
+        return moves
+
+    @classmethod
+    def from_cubie_move(cls, axis: int, side: int, direction: int, n: int) -> 'ActionToken':
+        """
+        side == 0 表示中心层转动：
+        - 奇数阶：layer = 0（物理中心）
+        - 偶数阶：layer = -1（约定表示中心 slice）
+        """
+        mid, c = divmod(n, 2)
+        if side == 0:
+            layer = 0 if c == 1 else -1
+        else:
+            layer = side * mid
+        return cls(axis=axis, layer=layer, direction=direction)
+
+    def to_cubie_move(self, n: int = 3) -> tuple | None:
+        """
+        side
+        最外层 → ±1
+        中心层 → 0（奇数:0, 偶数:-1）
+        其他中间层 → None
+        """
+        mid, c = divmod(n, 2)
+        side = None
+        if abs(self.layer) == mid:
+            side = 1 if self.layer > 0 else -1
+        if self.layer == 0 or (c == 0 and self.layer == -1):
+            side = 0
+        if side is None:
+            return None
+        dir_norm = self.direction % 4
+        if dir_norm == 3:
+            dir_norm = -1
+        return self.axis, side, dir_norm
+
+    def embedding(self, n: int = 3) -> np.ndarray:
+        """
+        动作的几何性质，几何 embedding
+        axis:      0,1,2 (X,Y,Z)
+        layer:     -mid .. +mid
+        direction: -1 (逆90), 2 (180), +1 (顺90)
+        n:         魔方阶数
+
+        返回: shape (9,) 或 (7,) 的向量
+        """
+        dir_norm = self.direction % 4
+        if dir_norm == 0:
+            raise ValueError(f"Invalid direction:{self.direction}")
+
+        mid = n // 2
+
+        # 1. axis one-hot (3 dim)
+        axis_oh = np.zeros(3)
+        axis_oh[self.axis] = 1.0
+
+        # 2. depth ∈ [-1, 1], coset 内 vs coset 间作用强度
+        depth = self.layer / mid
+        # layer_embed = np.array([np.sin(depth * np.pi), np.cos(depth * np.pi)])
+
+        # 3. direction one-hot (3 dim)，更易学习
+        dir_idx = dir_norm - 1
+        dir_oh = np.zeros(3)
+        dir_oh[dir_idx] = 1.0
+
+        # 4. outer-ness: 1=最外层,是否触发 coset 跳变
+        is_outer = 1.0 if abs(self.layer) == mid else 0.0
+        # distance_to_center = 1.0 - abs(self.layer) / mid
+
+        # 组合
+        return np.concatenate([
+            axis_oh,  # 3
+            [depth],  # 1
+            dir_oh,  # 3
+            [is_outer]  # 1
+        ])  # total 8 dim
+
+    def __add__(self, other) -> list["ActionToken"]:
+        """combine_with 列表组合"""
+        if isinstance(other, list):
+            return [self] + other
+        elif isinstance(other, ActionToken):
+            return [self, other]
+        else:
+            raise TypeError(
+                f"unsupported operand type(s) for +: '{type(self).__name__}' and '{type(other).__name__}'"
+            )
+
+    def __str__(self) -> str:
+        dir_norm = self.direction % 4
+        move_str = f"{['U', 'F', 'R'][self.axis]}{self.layer:+d}{dir_norm:+d}"
+        if dir_norm == 2: move_str = move_str[:-2] + "2"
+        if dir_norm == 3: move_str = move_str[:-2] + "'"
+        return move_str
+
+    @staticmethod
+    def invert_moves(moves: list['ActionToken']) -> list['ActionToken']:
+        """move 的逆 将 moves 转成可还原的逆操作序列（反向 + 方向反）"""
+        return [m.invert() for m in reversed(moves)]
+
+    @staticmethod
+    def commutator(A: list, B: list) -> list['ActionToken']:
+        """
+        交换子,制造局部扰动,奇偶性不变
+        A, B: move list
+        return: [A, B] = A B A⁻¹ B⁻¹
+        """
+        return A + B + ActionToken.invert_moves(A) + ActionToken.invert_moves(B)
+
+    @staticmethod
+    def conjugate(A: list, B: list) -> list['ActionToken']:
+        """
+        共轭 A B A⁻¹ 改变作用位置,保持结构不变 or A⁻¹ B A
+        """
+        return A + B + ActionToken.invert_moves(A)
+
+    @staticmethod
+    def cycle3(A: list, B: list, P: list) -> list['ActionToken']:
+        """
+        experimental
+        在 P(A,B) 定义的位置制造一个 3-cycle
+        A, B: 产生 3-cycle 的基元
+        P: 定位用的 conjugate position_moves
+        P · [A, B] · P⁻¹
+        """
+        base = ActionToken.commutator(A, B)
+        return ActionToken.conjugate(P, base)
+
+    @staticmethod
+    def at(position_moves: list, base_cycle: list) -> list['ActionToken']:
+        """
+        在指定位置制造一个贴纸 3-cycle
+        position_moves: 把目标贴纸搬到工作区的 moves
+        base_cycle: 已知在固定工作区的 cycle
+        cycle_at = P · base · P⁻¹
+        """
+        return ActionToken.conjugate(position_moves, base_cycle)
 
 
 class StickerCube(CubeBase):

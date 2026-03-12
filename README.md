@@ -12,6 +12,8 @@ rime/
 ├── pyramid.py       # 金字塔神经网络、旋转对称矩阵变换
 ├── cube.py          # 魔方建模：NxN魔方贴纸级状态表示与基础求解
 ├── cubie.py         # 魔方建模：块级群论建模、Kociemba两阶段算法
+├── cubieoperator.py # 群表示论：魔方群的表示分析、Bose-Mesner代数验证
+├── cubeworld.py     # 魔方世界：贴纸-群论双层模型、神经网络rank critic
 ├── cubedraw.py      # 魔方可视化：Pygame 3D渲染与交互
 ├── dice.py          # 骰子特征分析、游戏触发器规则
 └── body.py          # 遗传进化：人类血型遗传、新颖性搜索算法
@@ -63,14 +65,21 @@ solution = cube.solve()
 **核心特性：**
 - 块级状态表示：`CubieState` 包含角块/边块的置换与朝向
 - 群论建模：`G = (S₈ × S₁₂) ⋉ (ℤ₃⁷ × ℤ₂¹¹)`，状态空间约 4.3×10¹⁹
-- 角块 S₈ / 边块 S₁₂ 是置换群，ℤ₃⁷ / ℤ₂¹¹ 是朝向群，半直积表示方向和排列的半独立性。
+- 角块 S₈ / 边块 S₁₂ 是置换群，ℤ₃⁷ / ℤ₂¹¹ 是朝向群，半直积表示方向和排列的半独立性
 - 两阶段算法：Phase-1 (方向修正 + 边块分层) → Phase-2 (排列求解)
 - 剪枝表：CO×EO (2187×2048)、UD-slice (495)、角块/边块排列 (40320)
 - 同态投影：`CubieMove → Phase1Move/Phase2Move` 坐标映射
+- 双向转换：`CubieState ↔ StickerArray` 贴纸-块级状态互转
 
 **魔方块级状态流程图：**
 ```scss
 CubieState (角块+边块)
+        │
+        │ to_sticker() → (6,n,n) 贴纸数组
+        │                   ↓
+        │             from_cubie() (双向转换)
+        │                   ↑
+        │ to_cubie() ←─────┘
         │
         │ Phase1_project → Phase1Coord (CO, EO, UD-slice)
         │             ↑
@@ -88,13 +97,16 @@ CubieState (角块+边块)
 **核心类：**
 - `CubieState`: 块级状态，包含 8 角块 + 12 边块的置换与朝向
 - `CubieMove`: 群元素，支持半直积作用、合成、逆元
+- `SlowDynamics`: Phase-1 子群慢动力学模型，谱分解与慢流形分析
 - `Phase1Coord`: Phase-1 坐标 (CO, EO, UD-slice)
 - `Phase2Coord`: Phase-2 坐标 (角块/边块排列)
 - `CubieBase`: 继承自 `CubeBase`，提供两阶段搜索接口
+  - `to_cubie(state)`: 从贴纸数组转块级状态
+  - `from_cubie(cubie)`: 从块级状态转贴纸数组
 
 
 ```python
-from rime.cubie import CubieState, CubieMove, CubieBase
+from rime.cubie import CubieState, CubieMove, CubieBase, SlowDynamics
 
 # 创建已解状态
 state = CubieState.solved()
@@ -107,6 +119,14 @@ state = move.act(state)
 CubieBase.build_pruning_table()  # 构建剪枝表（首次运行）
 moves, cubie_move, final_state = CubieBase.solve_kociemba(state)
 print(f"Solution: {moves}")
+
+# 慢动力学分析
+model = SlowDynamics.from_phase1_generators(n_generators=18)
+vec = state.to_rho()  # 转换为 228 维表示
+z = model.project(vec)  # 投影到 100 维慢子空间
+z_t = model.evolve(z, T=10)  # 慢子空间演化
+x_t = model.reconstruct(z_t)  # 重构回原空间
+distance = model.heuristic(vec, x_t)  # 计算慢子空间距离
 ```
 
 **算法细节：**
@@ -114,12 +134,19 @@ print(f"Solution: {moves}")
 - **Phase-2 目标**: 角块/边块排列还原（在 G₁ = ⟨U,D,R²,L²,F²,B²⟩ 子群内）
 - **剪枝策略**: 联合 CO×EO + UD-slice 启发式，限制搜索深度
 - **群同态**: `φ: CubieMove → Phase1Move/Phase2Move` 满足 `φ(m₁∘m₂) = φ(m₁)∘φ(m₂)`
+- **慢动力学**: Phase-1 转移算符谱分层，5 个有理特征值层 (1, 7/9, 2/3, 5/9, 1/3)
 
 **数学基础：**
 - 状态空间: |G| ≈ 4.3×10¹⁹
 - 群结构: `G = (S₈ × S₁₂) ⋉ (ℤ₃⁷ × ℤ₂¹¹)`
 - Phase-1 子群: `G₁ = ⟨U,D,R²,L²,F²,B²⟩`, |G|/|G₁| ≈ 1.95×10¹⁰
 - 剪枝表大小: CO_EO (4.5M) + UD (495) + CO (40320) + EDGE (40320) + SLICE (24)
+- **慢流形谱分解**: 228 维表示 → 5 个特征值层
+  - λ=1: 24 维（守恒量）
+  - λ=7/9: 44 维（真实慢模态）
+  - λ=2/3: 32 维（次慢）
+  - λ=5/9: 96 维（中速）
+  - λ=1/3: 32 维（快衰减）
 
 **剪枝表构建**
 - CO×EO (2187×2048) → Phase1 方向搜索
@@ -159,7 +186,60 @@ app.run()
 - `S`: 生成并播放打乱序列
 - `R`: 重置魔方
 
-### 4. 遗传学系统 ([allele.py](rime/allele.py))
+### 4. 群表示论系统 ([cubieoperator.py](rime/cubieoperator.py))
+
+魔方群的表示论分析与 Bose-Mesner 代数验证。
+
+**核心特性：**
+- 块检测与分解：检测群表示的不可约子空间
+- 同构分解：检查 Cayley 图是否等价于 association scheme
+- 不变子空间验证：验证特征值对应的子空间在群生成元作用下的不变性
+- 交换子维数计算：分析群表示的自由度
+- 慢流形分析：Phase-1.5 状态空间的低维结构分析
+
+**核心函数：**
+- `detect_blocks()`: 检测群表示的块结构
+- `verify_association_scheme()`: 验证 Bose-Mesner 代数
+- `check_invariant_subspaces()`: 检查特征子空间的不变性
+- `commutant_dimension()`: 计算交换子代数维数
+
+**数学基础：**
+- 魔方群 228 维表示分解为多个不可约表示
+- Phase-1 生成元形成 5 个不变子空间（5 个有理特征值层）
+- 慢流形 (λ ≥ 2/3) 捕捉局部搜索结构，100 维慢子空间
+- 谱分层: λ ∈ {1, 7/9, 2/3, 5/9, 1/3}，对应维度 {24, 44, 32, 96, 32}
+- 慢谱嵌入对 10 步以内状态距离相关性显著 (r ≈ 0.5)
+- 快层谱半径 ≈ 5/9，20–23 步内充分衰减
+- 准等距距离: d(x,y) = ||V_slowᵀ(x-y)||，误差 1.0059 ± 0.0871
+
+### 5. 魔方世界模型 ([cubeworld.py](rime/cubeworld.py))
+
+贴纸-群论双层世界模型与神经网络 rank critic。
+
+**核心架构：**
+```
+[ 贴纸世界 / 连续 / 感知 ]
+        ↓ observables
+[ 中观物理量 / 势能 ]
+        ↓ 学习
+[ 群论世界 / 离散 / 搜索 ]
+```
+
+**核心类：**
+- `CubeEnv`: 连接贴纸世界和群论世界的环境
+- `RankingCritic`: 动作排序神经网络
+- `Phase15Critic`: Phase-1.5 阶段评估网络
+- `AngularLowRank`: 角向低秩结构建模 (rank=5 可精确拟合)
+- `StructuredMoveLayer`: 结构化群表示层 (W_left ⊙ e_move ⊙ W_right)
+- `LieMoveRepresentation`: 李代数参数化群表示 (ρ(g) = exp(Σ α_k A_k))
+
+**核心发现：**
+- Phase-1.5 状态空间的角向模式高度可压缩，rank=5 可精确拟合
+- 40 维 cubie 空间上，每个 move 是精确线性映射
+- 慢流形捕捉到宏观难度，但对远距离状态区分能力下降
+- 群表示在线性可学，move norm 稳定 (≈ 6.3)
+
+### 6. 遗传学系统 ([allele.py](rime/allele.py))
 
 完整的 ABO 血型系统遗传学建模。
 
@@ -189,7 +269,7 @@ compatible = Allele.is_compatible_phenotype('O', 'A')  # True
 - 遗传概率矩阵：支持基因型和表现型两层概率
 - 群体频率：Hardy-Weinberg 平衡计算
 
-### 5. 环形数据结构 ([circular.py](rime/circular.py))
+### 7. 环形数据结构 ([circular.py](rime/circular.py))
 
 支持动态游标、容量限制、持久化的环形数据结构。
 
@@ -211,7 +291,7 @@ band.transpose(4)  # 块转置
 - 支持 4 象限旋转对称切分
 - 可逆变换：band ↔ matrix ↔ 3d blocks
 
-### 6. 金字塔神经网络 ([pyramid.py](rime/pyramid.py))
+### 8. 金字塔神经网络 ([pyramid.py](rime/pyramid.py))
 
 基于递增环和旋转对称结构的混合神经网络架构。
 
@@ -235,7 +315,7 @@ outputs = nn.forward_pyramid(encoded_bands)
 - 层间交叉注意力
 - 支持 band 编码与嵌入学习
 
-### 7. 骰子特征系统 ([dice.py](rime/dice.py))
+### 9. 骰子特征系统 ([dice.py](rime/dice.py))
 
 三骰子游戏特征分析与触发器系统。
 
@@ -258,7 +338,7 @@ features = dice_feature_game((4, 4, 4))
 | 极限呈现 | 总和 > 16 | 极限表现 |
 | 保底 | 1,2,3 顺子 | 稳定输出 |
 
-### 8. 进化算法 ([body.py](rime/body.py))
+### 10. 进化算法 ([body.py](rime/body.py))
 
 遗传进化与新颖性搜索算法实现。
 
@@ -270,12 +350,16 @@ features = dice_feature_game((4, 4, 4))
 ## 依赖项
 
 ```bash
-pip install numpy pygame scipy
+pip install numpy pygame scipy torch scikit-learn joblib matplotlib
 ```
 
 - `numpy`: 数值计算、数组操作
 - `pygame`: 可视化渲染
-- `scipy`: 科学计算（可选，用于距离计算）
+- `scipy`: 科学计算（距离计算、统计）
+- `torch`: 深度学习框架（神经网络模型）
+- `scikit-learn`: 机器学习工具（PCA、TSNE 等）
+- `joblib`: 数据序列化（缓存剪枝表、数据集）
+- `matplotlib`: 数据可视化
 
 ## 快速开始
 
@@ -335,6 +419,58 @@ pyramid.build(genotypes_iter)
 matrix = pyramid.to_matrix(fill_center_with=('O', 'O'))
 ```
 
+### 群表示分析
+
+```python
+from rime.cubieoperator import detect_blocks, verify_association_scheme
+from rime.cubie import CubieMove, SlowDynamics, CubieState
+import numpy as np
+
+# 获取 Phase-1 生成元
+generators = list(CubieMove.phase1_moves().values())
+
+# 构建 228 维表示
+# U, w = build_group_representation(generators)  # 假设有此函数
+# blocks = detect_blocks(generators, U)
+
+# 验证 Bose-Mesner 代数
+# success, message, details = verify_association_scheme(A_micro, generators)
+
+# 慢动力学模型
+model = SlowDynamics.from_phase1_generators(n_generators=18)
+state_a = CubieState.solved()
+state_b = CubieMove.from_rotation(0, 1, 1).act(state_a)
+
+vec_a = state_a.to_rho()
+vec_b = state_b.to_rho()
+z_a = model.project(vec_a)  # (100,) 慢子空间
+z_b = model.project(vec_b)
+
+# 慢子空间距离（可用作启发式）
+slow_distance = model.heuristic(vec_a, vec_b)
+
+# 慢子空间演化
+z_t = model.evolve(z_a, T=10)
+x_t = model.reconstruct(z_t)
+```
+
+### 魔方世界模型
+
+```python
+from rime.cubeworld import CubeEnv, Phase15Critic, train_ranking_critic_15
+from rime.cubie import CubieBase
+
+# 创建环境
+env = CubeEnv(n=3)
+env.build_pruning_table()
+
+# 训练 Phase-1.5 critic
+critic = train_ranking_critic_15(num_epochs=10, batch_size=32)
+
+# 生成 Phase-1.5 数据集
+dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, num_samples=20000)
+```
+
 ## 数学模型
 
 ### 魔方贴纸级状态空间
@@ -357,6 +493,13 @@ matrix = pyramid.to_matrix(fill_center_with=('O', 'O'))
 - **Kociemba 算法**: 分两阶段降维求解
   - Phase-1: 恢复方向 + 边块分层（搜索空间 ~10¹⁰）
   - Phase-2: 排列还原（搜索空间 ~10⁸）
+- **慢动力学谱分解**: Phase-1 转移算符 A = (1/|S|)∑ρ(s) 的谱结构
+  - 5 个有理特征值层: λ ∈ {1, 7/9, 2/3, 5/9, 1/3}
+  - 对应维度: {24, 44, 32, 96, 32}，总计 228 维
+  - 慢子空间 (λ ≥ 2/3): 100 维，准不变子空间
+  - 快子空间 (λ < 2/3): 128 维，谱半径 ≈ 5/9，20–23 步内衰减
+  - 转移算符: A = Σ λ_i E_i，E_i 为特征投影子
+  - 慢演化: z_t = λ^t z₀，T=100 相对误差 < 6×10⁻⁷
 
 ### ABO 血型遗传
 
@@ -372,14 +515,41 @@ matrix = pyramid.to_matrix(fill_center_with=('O', 'O'))
 - **元素总数**: `(2n + 1)² = 4n(n+1) + 1`
 - **环形编码**: 第 i 层 `8i` 个元素
 
+### 魔方群表示论
+
+- **表示空间**: Phase-1 生成元在 228 维复空间上的表示
+- **谱分解**: 5 个不变子空间，对应 5 个不可约表示
+  - 快速模态 (λ < 1/3): 32 维
+  - 中速模态 (1/3 ≤ λ < 2/3): 96 维
+  - 慢速模态 (λ ≥ 2/3): 100 维
+  - 守恒模态 (λ = 1): 24 维（群谐函数）
+- **慢流形**: 捕捉局部搜索结构，对 10 步内状态距离相关性 r ≈ 0.5
+- **角向低秩**: Phase-1.5 状态空间的角向变化 rank=5 可精确拟合
+- **转移算符**: A = (1/|S|)∑ρ(s)，谱分解 A = Σ λ_i E_i
+- **有效动力学**: 约 5–6 个宏观时间尺度，rank-6 attention operator
+- **群谐性质**: 前 8 个模式精确谐（误差=0），λ=7/9 层准谐（误差≈0.17±0.444）
+
+### 贴纸-块级双向转换
+
+- **to_cubie()**: 从 `(6, n, n)` 贴纸数组转 `CubieState` (40 维)
+  - 角块方向: 通过 roll 循环匹配计算
+  - 边块翻转: 通过 roll 循环匹配计算
+  - 验证: 满足群论约束 (朝向和为 0 mod n)
+- **from_cubie()**: 从 `CubieState` 转 `(6, n, n)` 贴纸数组
+  - 基于已解状态的角块/边块坐标映射
+  - 朝向通过 roll 操作应用
+  - 保证贴纸数组满足物理约束
+
 ## 项目特点
 
-1. **跨学科融合**: 涵盖群论、遗传学、金字塔神经网络、游戏触发器
-2. **双重建模**: 贴纸级与块级魔方建模，从直观表示到抽象群论
-3. **严格的数学基础**: 基于群论的魔方建模、基于孟德尔定律的遗传计算
-4. **高效算法**: Kociemba 两阶段算法、剪枝表优化、群同态投影
-5. **可视化支持**: Pygame 3D 渲染、实时交互
-6. **扩展性设计**: 支持自定义阶魔方、血型系统、金字塔层数配置
+1. **跨学科融合**: 涵盖群论、遗传学、金字塔神经网络、游戏触发器、表示论、谱动力学
+2. **双重建模**: 贴纸级与块级魔方建模，双向可逆转换
+3. **严格的数学基础**: 基于群论的魔方建模、基于孟德尔定律的遗传计算、Bose-Mesner 代数验证
+4. **高效算法**: Kociemba 两阶段算法、剪枝表优化、群同态投影、慢流形分析
+5. **谱动力学**: 228 维群表示的 5 层谱分解，100 维慢子空间准等距距离启发式
+6. **神经网络支持**: Ranking Critic、Phase-1.5 评估网络、李代数群表示、结构化 Move 层
+7. **可视化支持**: Pygame 3D 渲染、实时交互、训练曲线可视化
+8. **扩展性设计**: 支持自定义阶魔方、血型系统、金字塔层数、群表示维度
 
 ## 许可证
 
