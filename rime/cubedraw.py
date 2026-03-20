@@ -496,7 +496,7 @@ class RubiksCubeDraw:
                         self.enqueue_moves(seq)
                         pending_moves.clear()
                     elif ev.key == pygame.K_g:  # 生成并播放 scramble 序列
-                        pending_moves = self.cube.generate_moves(25)
+                        pending_moves = list(self.cube.generate_moves(25))
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_s:
                         pending_moves = cubie.solve_sticker(self.cube.get_state())
@@ -504,6 +504,8 @@ class RubiksCubeDraw:
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_l:
                         print(self.cube.faces_colors)
+                    elif ev.key == pygame.K_n:
+                        self.cube.normalize()
                     elif ev.key == pygame.K_c:  # 清空 pending 队列
                         # clear pending
                         self.pending.clear()

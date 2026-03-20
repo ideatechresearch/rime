@@ -6,6 +6,7 @@ pandas>=2.2.3
 pillow==10.4.0
 requests==2.32.3
 sympy==1.14.0
+scipy>=1.16.0
 pygame ==2.6.1
 PyOpenGL==3.1.10
 joblib==1.5.3

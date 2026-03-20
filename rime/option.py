@@ -157,6 +157,44 @@ class BinomialTree(OptionEngine):
         return values[0]
 
 
+def compute_sigma(returns, window=100):
+    """波动率 returns = np.diff(np.log(price_series))"""
+    return np.std(returns[-window:]) + 1e-8
+
+
+def compute_z(price, S0, sigma):
+    """动态区间"""
+    return (price - S0) / sigma
+
+
+def compute_trend(price_series, sigma, short=20, long=100):
+    """趋势强度"""
+    ema_short = price_series[-short:].mean()
+    ema_long = price_series[-long:].mean()
+    return abs(ema_short - ema_long) / sigma
+
+
+def simulate_price(S0, mu, sigma, dt, n_steps):
+    S = [S0]
+    for _ in range(n_steps):
+        dW = np.random.randn() * np.sqrt(dt)
+        dS = mu * dt + sigma * dW
+        S.append(S[-1] + dS)
+    return np.array(S)
+
+
+def control_u(z, trend, u_max, k=1.5, c=1.0):
+    """控制函数 u(x)"""
+    position_term = np.tanh(-z / k)  # 位置项（决定 A / B）
+    trend_term = 1 / (1 + c * trend ** 2)  # 趋势抑制（趋势大 → 缩仓）
+    return u_max * position_term * trend_term
+
+
+def target_position(u, price, S0):
+    """目标持仓"""
+    return -u * (price - S0)
+
+
 if __name__ == "__main__":
     # 1. 实例化参数
     params = {
@@ -179,3 +217,34 @@ if __name__ == "__main__":
     print(f"欧式价格: {p_euro:.4f}")
     print(f"美式二叉树价格: {p_ame:.4f}")
     print(f"隐含波动率 美式 IV: {iv_value:.2%}")
+
+    # Q = 0
+    # pnl = 0
+    #
+    # for t in range(100, len(price_series)):
+    #
+    #     price = price_series[t]
+    #
+    #     # --- 状态 ---
+    #     returns = np.diff(np.log(price_series[:t]))
+    #     sigma = compute_sigma(returns)
+    #     z = compute_z(price, S0, sigma)
+    #     trend = compute_trend(...)
+    #
+    #     # --- 控制 ---
+    #     u = control_u(z, trend, sigma, u_max)
+    #
+    #     # --- 目标持仓 ---
+    #     Q_target = -u * (price - S0)
+    #
+    #     # --- 调仓 ---
+    #     dQ = Q_target - Q
+    #
+    #     if abs(dQ) > trade_threshold:
+    #         cost = abs(dQ) * price * fee
+    #         Q += dQ
+    #     else:
+    #         cost = 0
+    #
+    #     # --- PnL ---
+    #     pnl += Q * (S[t] - S[t - 1]) - cost

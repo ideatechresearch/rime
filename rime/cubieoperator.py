@@ -1,7 +1,8 @@
-from rime.cubie import CubieState, CubieMove, CubieBase, SlowDynamics
+from rime.cubie import CubieState, CubieMove, CubieBase
 import numpy as np
-import random
-from scipy.stats import pearsonr, spearmanr
+import random, math
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
 def detect_blocks(moves, U, tol=1e-8):
@@ -801,73 +802,339 @@ def spectral_evolve(x, lambdas, M_layers):
     return x_next
 
 
-from collections import deque
+def analyze_block_spectrum(A_block, blocks):
+    """
+    对每个 block 计算子矩阵的特征值分布，并可视化
+
+    Parameters:
+    - A_block: 228×228 的对角块矩阵（A_micro 的块对角形式）
+    - blocks: list of index lists (e.g. [角块索引], [棱块索引], ...)
+    """
+    block_eigvals = {}
+    for i, block_idx in enumerate(blocks):
+        size = len(block_idx)
+        # 提取子矩阵
+        sub_A = A_block[np.ix_(block_idx, block_idx)]
+
+        # 特征值分解（只取实部，因为 A 是 Hermitian）
+        eigvals = np.linalg.eigvalsh(sub_A)  # eigh for Hermitian
+        eigvals = np.sort(eigvals)[::-1]  # 降序
+
+        print(f"\nBlock {i} (size {size}):")
+        print("Top 10 eigenvalues:", eigvals[:10])
+        print("Unique rounded values:", np.unique(np.round(eigvals, decimals=6)))
+        if size > 1:
+            block_eigvals[f"Block {i} (size {size})"] = eigvals
+
+    # 可视化所有块的谱分布
+    plt.figure(figsize=(12, 8))
+    for name, ev in block_eigvals.items():
+        plt.plot(ev, label=name, linewidth=2, alpha=0.8)
+
+    plt.axhline(1.0, color='gray', linestyle='--', alpha=0.5)
+    plt.axhline(7 / 9, color='purple', linestyle='--', alpha=0.5, label='7/9')
+    plt.axhline(2 / 3, color='blue', linestyle='--', alpha=0.5, label='2/3')
+    plt.axhline(5 / 9, color='green', linestyle='--', alpha=0.5, label='5/9')
+    plt.axhline(1 / 3, color='orange', linestyle='--', alpha=0.5, label='1/3')
+
+    plt.xlabel('Eigenvalue Index (sorted descending)')
+    plt.ylabel('Eigenvalue')
+    plt.title('Spectral Distribution by Block')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1.05)
+    plt.savefig("data/Spectral Distribution by Block.png", dpi=300, bbox_inches='tight')
+    plt.show()
+
+    eigvals_64 = next(ev for name, ev in block_eigvals.items() if 'size 64' in name)
+    eigvals_144 = next(ev for name, ev in block_eigvals.items() if 'size 144' in name)
+    slow_energy_64 = np.sum(eigvals_64[eigvals_64 >= 2 / 3] ** 2)
+    slow_energy_144 = np.sum(eigvals_144[eigvals_144 >= 2 / 3] ** 2)
+    print(f"Slow energy from 64 block: {slow_energy_64 / (slow_energy_64 + slow_energy_144):.2%}")
+
+    return block_eigvals
 
 
-class BalanceWorld:
-    def __init__(self, n=18, max_depth=40, balance_tol=10.0):
-        self.model = SlowDynamics(n)  # SlowDynamics instance
-        solved = CubieState.solved()
-        self.solved_rho = solved.vector
-        self.z_solved = self.model.project(self.solved_rho)
-        self.order_pan = deque([(solved, 0.0)])  # (state, weight)
-        self.chaos_pan = deque([])
-        self.max_depth = max_depth
-        self.balance_tol = balance_tol
-        self.history = []  # Track pan weights over time
+def compute_block_distance_expectation(corner_idx, edge_idx, num_samples_per_depth=300, max_depth=40):
+    """
+    计算 E[d_spec | depth=k]，分别对 corner block (64) 和 edge block (144)
+    d_spec = || proj_block(v - v_solved) ||   （块子空间中的谱距离）
+    """
 
-    def weight(self, state):
-        rho = state.vector
-        z = self.model.project(rho)
-        return self.model.distance(z, self.z_solved)  # Slow distance as weight
+    # solved 在块上的投影（中心）
+    v_solved = CubieState.solved().vector
+    v_solved_corner = v_solved[corner_idx]
+    v_solved_edge = v_solved[edge_idx]
 
-    def generate_state(self, target_weight):
-        depth = int(target_weight)  # Approximate depth for scramble
-        state = CubieBase.generate_cubie(length=min(depth, self.max_depth))
-        actual_weight = self.weight(state)
-        return state, actual_weight
+    depths = np.arange(0, max_depth + 1)
+    mean_corner = []
+    mean_edge = []
 
-    def balance(self):
-        order_weight = sum(w for _, w in self.order_pan)
-        chaos_weight = sum(w for _, w in self.chaos_pan)
-        imbalance = order_weight - chaos_weight
+    print("正在计算块级谱距离期望...")
+    for k in tqdm(depths):
+        dist_c = []
+        dist_e = []
+        for _ in range(num_samples_per_depth):
+            state = CubieBase.generate_cubie(length=k)
+            v = state.vector
 
-        if abs(imbalance) > self.balance_tol:
-            if imbalance > 0:
-                # Add to chaos pan
-                target = abs(imbalance)
-                state, w = self.generate_state(target)
-                self.chaos_pan.append((state, w))
+            # 投影到块子空间并中心化
+            proj_c = v[corner_idx] - v_solved_corner
+            proj_e = v[edge_idx] - v_solved_edge
+
+            dist_c.append(np.linalg.norm(proj_c))
+            dist_e.append(np.linalg.norm(proj_e))
+
+        mean_corner.append(np.mean(dist_c))
+        mean_edge.append(np.mean(dist_e))
+
+    # 绘图
+    plt.figure(figsize=(12, 8))
+    plt.plot(depths, mean_corner, 'o-', label='Corner block (64)', linewidth=2.5, markersize=6)
+    plt.plot(depths, mean_edge, 's-', label='Edge block (144)', linewidth=2.5, markersize=6)
+
+    # 理论参考线
+    plt.plot(depths, np.sqrt(depths) * 0.8, '--', color='purple', label='√k (diffusion theory)', alpha=0.7)
+    plt.axhline(np.mean(mean_edge[-5:]), color='red', linestyle='--', label='Edge saturation level')
+
+    plt.xlabel('Scramble Depth k')
+    plt.ylabel('E[d_spec | depth=k]  (块子空间谱距离)')
+    plt.title('Corner vs Edge Block: Expected Spectral Distance vs Depth')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("data/Corner vs Edge Block_Expected Spectral Distance vs Depth.png", dpi=300, bbox_inches='tight')
+    plt.show()
+
+    return depths, mean_corner, mean_edge
+
+
+def compute_inter_state_block_distance(corner_idx, edge_idx, num_pairs_per_depth=200, max_depth=40):
+    """
+    计算两个独立随机状态 (depth=k) 在角块/棱块子空间中的期望距离 E[d_block | depth=k]
+
+    d_block = || proj_block(vA - vB) ||   （块子空间中的谱距离）
+    """
+
+    depths = np.arange(0, max_depth + 1)
+    mean_corner = []
+    mean_edge = []
+    std_corner = []
+    std_edge = []
+
+    print("正在计算两个随机状态间的块级谱距离期望...")
+    for k in tqdm(depths):
+        dist_c = []
+        dist_e = []
+        for _ in range(num_pairs_per_depth):
+            # 两个独立 scramble
+            stateA = CubieBase.generate_cubie(length=k)
+            stateB = CubieBase.generate_cubie(length=k)
+
+            vA = stateA.vector
+            vB = stateB.vector
+
+            # 块子空间投影差
+            diff_c = vA[corner_idx] - vB[corner_idx]
+            diff_e = vA[edge_idx] - vB[edge_idx]
+
+            dist_c.append(np.linalg.norm(diff_c))
+            dist_e.append(np.linalg.norm(diff_e))
+
+        mean_corner.append(np.mean(dist_c))
+        mean_edge.append(np.mean(dist_e))
+        std_corner.append(np.std(dist_c))
+        std_edge.append(np.std(dist_e))
+
+    # 绘图
+    plt.figure(figsize=(12, 7))
+
+    # 角块
+    plt.errorbar(depths, mean_corner, yerr=std_corner, fmt='o-', label='Corner block',
+                 capsize=4, linewidth=2.5, markersize=6, color='blue', alpha=0.9)
+
+    # 棱块
+    plt.errorbar(depths, mean_edge, yerr=std_edge, fmt='s-', label='Edge block',
+                 capsize=4, linewidth=2.5, markersize=6, color='orange', alpha=0.9)
+
+    # plt.loglog(depths[1:], mean_corner[1:], 'o-', label='Corner (log)')
+    # plt.loglog(depths[1:], mean_edge[1:], 's-', label='Edge (log)')
+
+    # 理论参考线
+    plt.plot(depths, np.sqrt(2 * depths) * 0.8, '--', color='purple',
+             label='√(2k) (diffusion theory)', alpha=0.7, linewidth=2)
+
+    plt.axhline(np.mean(mean_edge[-5:]), color='red', linestyle='--',
+                label='Edge saturation level', alpha=0.7)
+
+    plt.xlabel('Scramble Depth k (both states)')
+    plt.ylabel('E[d_block | depth=k]  (块子空间谱距离)')
+    plt.title('Inter-State Spectral Distance in Corner vs Edge Blocks')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("data/Inter-State Spectral Distance in Corner vs Edge Blocks.png", dpi=300, bbox_inches='tight')
+    plt.show()
+
+    return depths, mean_corner, mean_edge, std_corner, std_edge
+
+
+def classify_moves_by_slow_effect(model, trials=20):
+    solved = CubieState.solved()
+    z0 = model.project(solved.vector)
+
+    move_effect = {}
+
+    for k, mv in CubieMove.prim_moves.items():
+
+        dists = []
+
+        for _ in range(trials):
+            state = CubieBase.generate_cubie(length=10)
+            z_before = model.project(state.vector)
+
+            new_state = mv.act(state)
+            z_after = model.project(new_state.vector)
+
+            d = np.linalg.norm(z_after - z_before)
+
+            dists.append(d)
+
+        move_effect[k] = np.mean(dists)
+
+    return move_effect
+
+
+def simulate_block_dominated_evolution(model, corner_idx, edge_idx, T=100, num_trials=5, effect_ratio=1.0):
+    """
+    分别模拟：
+    - Pure Edge moves（棱块主导 → fast mixing）
+    - Pure Corner moves（角块主导 → slow diffusion）
+    观察 slow manifold 上的距离变化和轨迹
+    """
+    solved = CubieState.solved()
+    z_solved = model.project(solved.vector)
+    # 1. 分类 moves（根据 block 影响强度）
+    edge_moves = []
+    corner_moves = []
+    for k, mv in CubieMove.prim_moves.items():  # 群共轭类(conjugacy class)导致
+        rho = mv.rho()
+        edge_block = rho[edge_idx][:, edge_idx]
+        corner_block = rho[corner_idx][:, corner_idx]
+        edge_effect = np.linalg.norm(edge_block - np.eye(len(edge_idx)), 'fro')  # / np.sqrt(144)
+        corner_effect = np.linalg.norm(corner_block - np.eye(len(corner_idx)), 'fro')  # / np.sqrt(64)
+
+        if edge_effect > corner_effect:
+            edge_moves.append(mv)
+        else:
+            corner_moves.append(mv)
+        print(k, edge_effect, corner_effect)
+
+    """
+    所有 generator effect 一样
+    但 mixing rate 不一样
+    所有 generator 在表示里是等价的/群共轭类（conjugacy class）/表示的等变性
+    (0, -1, -1) 9.797958971132712 8.0
+    (0, -1, 1) 9.797958971132712 8.0
+    (0, -1, 2) 9.797958971132712 8.0
+    (0, 1, -1) 9.797958971132712 8.0
+    (0, 1, 1) 9.797958971132712 8.0
+    (0, 1, 2) 9.797958971132712 8.0
+    (1, -1, -1) 9.797958971132712 8.0
+    (1, -1, 1) 9.797958971132712 8.0
+    (1, -1, 2) 9.797958971132712 8.0
+    (1, 1, -1) 9.797958971132712 8.0
+    """
+
+    print(f"Edge-heavy moves: {len(edge_moves)} | Corner-heavy moves: {len(corner_moves)}")
+    if not edge_moves:
+        edge_moves = []
+        corner_moves = []
+        for k, mv in CubieMove.prim_moves.items():  # edge_change == corner_change
+            # 应用 move 到 solved，比较变化
+            after = mv.act(solved)
+            corner_change = np.sum(after.corners_perm != solved.corners_perm) + \
+                            np.sum(after.corners_ori != solved.corners_ori)
+            edge_change = np.sum(after.edges_perm != solved.edges_perm) + \
+                          np.sum(after.edges_ori != solved.edges_ori)
+
+            corner_score = corner_change / 8.0
+            edge_score = edge_change / 12.0
+            if edge_score > corner_score:
+                edge_moves.append(mv)
             else:
-                # Add to order pan (generate low-weight state)
-                target = abs(imbalance)
-                state, w = self.generate_state(target / 2)  # Bias toward order
-                self.order_pan.append((state, w))
+                corner_moves.append(mv)
 
-        self.history.append((order_weight, chaos_weight))
+        print(f"Edge-heavy moves: {len(edge_moves)} | Corner-heavy moves: {len(corner_moves)}")
 
-    def evolve(self, steps=10):
-        for t in range(steps):
-            # if t % self.model.Tf == 0:
-            #     for agent in self.agents:
-            #         agent.fast_mix()  # 模拟个体噪声
-            # Evolve states on both pans
-            for pan in [self.order_pan, self.chaos_pan]:
-                for i in range(len(pan)):
-                    state, w = pan[i]
-                    # Apply random move and reproject
-                    g = CubieBase.random_walk(length=1)
-                    new_state = g.act(state)
-                    new_w = self.weight(new_state)
-                    pan[i] = (new_state, new_w)
-            self.balance()  # Rebalance after evolution
+    # 2. 模拟两种演化
+    plt.figure(figsize=(14, 6))
+
+    for trial in range(num_trials):
+        # --- Edge-dominated (fast mixing) ---
+        state = CubieState.solved()
+        dist_edge = []
+        for t in range(T):
+            m = np.random.choice(edge_moves)
+            state = m.act(state)
+            z = model.project(state.vector)
+            dist_edge.append(model.distance(z, z_solved))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(dist_edge, alpha=0.6, label=f'Edge trial {trial + 1}')
+
+        # --- Corner-dominated (slow diffusion) ---
+        state = CubieState.solved()
+        dist_corner = []
+        for t in range(T):
+            m = np.random.choice(corner_moves)
+            state = m.act(state)
+            z = model.project(state.vector)
+            dist_corner.append(model.distance(z, z_solved))
+
+        plt.subplot(1, 2, 2)
+        plt.plot(dist_corner, alpha=0.6, label=f'Corner trial {trial + 1}')
+
+    # 左图：Edge moves（快速饱和）
+    plt.subplot(1, 2, 1)
+    plt.title('Edge moves → Fast Mixing (Chaotic Bulk)')
+    plt.xlabel('Time steps')
+    plt.ylabel('Slow manifold distance to solved')
+    plt.axhline(np.mean(dist_edge[-10:]), color='red', ls='--', label='Saturation level')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # 右图：Corner moves（慢扩散）
+    plt.subplot(1, 2, 2)
+    plt.title('Corner moves → Slow Diffusion')
+    plt.xlabel('Time steps')
+    plt.ylabel('Slow manifold distance to solved')
+    # 加 √t 参考线
+    t = np.arange(T)
+    plt.plot(t, 0.8 * np.sqrt(t), '--', color='purple', label='≈ √t (diffusion)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("data/simulate_block_dominated.png", dpi=300, bbox_inches='tight')
+    plt.show()
+
 
 
 if __name__ == '__main__':
+
+    import os
+
+    # Adjust these paths to match your actual Tcl/Tk directories
+    os.environ['TCL_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tcl8.6'
+    os.environ['TK_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tk8.6'
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
+    plt.rcParams['axes.unicode_minus'] = False
+
     all_moves = CubieMove.prim_moves().copy()
     all_moves.update(CubieMove.slice_moves())
 
-    samples = list(all_moves.values())  # 27
+    samples = list(all_moves.values())  # 27 21
     prim_list18 = list(CubieMove.prim_moves.values())
     A = CubieBase.generate_cubie_rho(27)
     print(A.shape)
@@ -878,6 +1145,11 @@ if __name__ == '__main__':
         M = U.T.conj() @ mv.rho() @ U
         blocks.append(M)
     print(len(blocks))
+
+    blocks = detect_blocks(samples, U)
+    sizes = [len(b) for b in blocks]
+    print("Block sizes:", sorted(sizes))  # ..., 64, 144
+    print("Number of blocks:", len(blocks))
 
     moves = list(CubieMove.prim_moves.values())
     M0 = CubieMove.identity()
@@ -988,6 +1260,108 @@ if __name__ == '__main__':
     w, V = np.linalg.eig(A_micro)
 
     print("sw:", np.sum(np.isclose(w, 1.0)))
+    eigvals, U = np.linalg.eig(A_micro)
+
+    blocks = detect_blocks(list(CubieMove.prim_moves().values()), U)
+    sizes = [len(b) for b in blocks]
+    print("Block sizes:", sorted(sizes))  # ..., 64, 144
+    print("Number of blocks:", len(blocks))
+    # blocks[0]=64角块, blocks[1]=144棱块（根据之前 detect_blocks 顺序）
+    corner_idx = blocks[0]  # size 64 [0,...63]
+    edge_idx = blocks[1]  # size 144 [64,....207]
+
+    T = np.zeros((228, 228), dtype=np.complex64)
+
+    for mv in CubieMove.prim_moves.values():
+        T += mv.matrix
+
+    T /= len(CubieMove.prim_moves())
+
+    wT, vT = np.linalg.eig(T)
+
+    idx = np.argsort(-np.abs(wT))
+    wT = wT[idx]
+    vT = vT[:, idx]
+    # print(wT, vT)
+    edge_energy = np.linalg.norm(T[edge_idx][:, edge_idx])
+    corner_energy = np.linalg.norm(T[corner_idx][:, corner_idx])
+    for i in range(15):
+        vec = vT[:, i]
+
+        corner_part = np.linalg.norm(vec[corner_idx])
+        edge_part = np.linalg.norm(vec[edge_idx])
+
+        print(i, w[i], corner_part, edge_part)
+
+    """
+    Block sizes: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 64, 144]
+    Number of blocks: 22
+    20 个 1D block:11 + 7 + 1 + 1 = 20 合法状态守恒量
+    208:真正参与 random walk dynamics 的空间 
+    144:fast mixing bulk
+    """
+    A_block = V.T.conj() @ A_micro @ V
+    block_spectra = analyze_block_spectrum(A_block, blocks)
+    """
+    蓝色曲线（Block 0, size 64，角块）
+    谱从 1.0 缓慢下降，到第 20–40 个特征值仍在 0.6–0.8 区间。
+    明显覆盖了 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
+    下降速度慢，说明角块子空间贡献了大部分慢模式（集体缩放、准守恒行为）。
+    
+    橙色曲线（Block 1, size 144，棱块）
+    谱从 1.0 快速下降，到第 40 个左右已跌破 0.6，第 80 个左右跌到 0.4 以下。
+    明显覆盖了 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
+    下降速度快，说明棱块子空间贡献了大部分快模式（快速随机化、混沌扩散）。
+    
+    守恒层（λ=1）由所有小块 + 部分角块共同支撑。
+    
+    64 dim 角块（Block 0）
+    谱从 1.0 缓慢下降，覆盖 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
+    主导慢层（7/9 + 2/3），是慢动力学的核心贡献者。
+    
+    144 dim 棱块（Block 1）
+    谱快速下降，覆盖 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
+    主导快层（5/9 + 1/3），负责快速随机化和混沌混合。
+    
+    21 个 size=1 小块（Block 2–21）
+    全部是单一特征值（一条线），没有退化。
+    分类总结：
+    λ=1.0（守恒）：Block 10, 12, 18, 20（至少 4 个）
+    λ=7/9（慢）：Block 11, 13–17, 19, 21（至少 8 个）
+    λ=2/3（次慢）：Block 2–9（至少 8 个）
+    
+    这些小块是独立的 1 维不变子空间（trivial 或简单 scaling 表示），支撑了守恒层和部分慢层。
+    
+    整体结构总结
+    慢层（λ ≥ 2/3 ≈100 维） = 角块（64） + 小块中的 7/9 和 2/3（约 16 个 1 维）
+    快层（λ ≤ 5/9 ≈128 维） = 棱块（144）主导
+    守恒层（λ=1, 24 维） = 小块中的 λ=1 + 角块/棱块的部分 trivial 表示
+    没有“纯随机”块，所有块都有明确谱贡献 → 整个 228 维表示是结构化的块对角分解，而非均匀混合。
+    
+    棱块有 12 个位置（置换群 S12），维度 144 = 12! / (12-12)! 的部分 + 朝向 2^11，变化空间大，容易产生“慢衰减”的集体模式（e.g. 整体置换趋势、长程相关）。
+    角块只有 8 个位置（S8），维度 64 = 8! / (8-8)! + 朝向 3^7，变化更局部，更多贡献“中速”或“准守恒”模式（7/9, 2/3）。
+    Slow energy from 64 block: 15.22%
+    
+    The 228-dimensional transfer operator A decomposes into block-diagonal form under the cubie basis, with principal blocks of size 64 (corners) and 144 (edges), plus 19 trivial 1-dimensional blocks. The eigenvalue spectrum of each block reveals clear separation: the 64-dimensional corner block dominates the slow layers (λ ≈ 7/9 and 2/3), exhibiting slower decay and contributing to quasi-invariant dynamics. In contrast, the 144-dimensional edge block dominates the fast layers (λ ≈ 5/9 and 1/3), with rapid spectral fall-off consistent with chaotic mixing. The trivial blocks concentrate near λ = 1, supporting the exact invariant subspace (dim 24). This block-level spectral stratification confirms that slow dynamics are primarily driven by corner orientations and permutations, while fast randomization arises from edge permutations, providing a structural explanation for the observed 5-layer rational spectrum and slow-fast separation.
+    The 228-dimensional transfer operator decomposes into a block-diagonal form under the cubie basis, with principal blocks of size 64 (corners), 144 (edges), and 21 trivial 1-dimensional blocks. Spectral analysis of each block reveals clear separation of contributions:
+    The 64-dimensional corner block dominates the slow layers (λ ≈ 7/9 and 2/3), exhibiting gradual spectral decay and contributing to quasi-invariant dynamics.
+    The 144-dimensional edge block dominates the fast layers (λ ≈ 5/9 and 1/3), with rapid fall-off consistent with chaotic mixing.
+    The 21 1-dimensional blocks concentrate at discrete values: λ = 1.0 (invariant/trivial), λ = 7/9 (slow scaling), and λ = 2/3 (intermediate diffusion), each contributing exactly one eigenvalue per block.
+    This block-level stratification confirms that slow dynamics are primarily driven by corner orientations and permutations, fast randomization by edge permutations, and conserved quantities by trivial 1D representations. The clean separation explains the observed 5-layer rational spectrum and the slow manifold's robustness under group action.
+    Block-level energy decomposition of the slow manifold (λ ≥ 2/3, 100 dimensions) reveals that the 144-dimensional edge block contributes approximately 84.78% of the slow-layer energy, while the 64-dimensional corner block accounts for 15.22%. The 21 trivial 1-dimensional blocks contribute negligibly (<1%). This distribution indicates that collective edge permutations and orientations dominate the slow dynamics, providing long-range correlations and quasi-invariant modes, whereas corner configurations contribute more localized slow scaling. Fast-layer energy (λ < 2/3, 128 dimensions) is overwhelmingly from the edge block, confirming its role in rapid randomization. The spectral separation by cubie type underscores a structural origin for the observed 5-layer rational spectrum: slow layers emerge from edge-driven collective behavior, while corner blocks support intermediate quasi-conserved modes.   
+    """
+    depths, mean_corner, mean_edge = compute_block_distance_expectation(corner_idx, edge_idx, num_samples_per_depth=300)
+    """
+    角块（64 dim） ≈ 扩散几何（diffusion geometry，距离随 √k 增长）
+    棱块（144 dim） ≈ 混沌体（chaotic bulk，距离快速饱和）
+    角块：早期 √k + 中后期饱和 → 有限扩散几何（diffusion in bounded space）
+棱块：极快饱和 → 混沌体（strong mixing, ergodic-like）
+两条曲线在 depth ≈5 后完全分离，棱块饱和值（≈4.5）明显高于角块（≈3.3），说明棱块的“混沌容量”更大，状态空间更“宽广”。
+    Expected spectral distance in block subspaces as a function of scramble depth k reveals stark geometric differences. The 64-dimensional corner block exhibits diffusion-like scaling, with distance growing approximately as √k in the early regime (k ≤ 10) before saturating around 3.3–3.5 at higher depths. In contrast, the 144-dimensional edge block displays rapid saturation, reaching ≈4.4–4.5 by depth ≈5 and remaining flat thereafter. This confirms the prediction: corners behave as a diffusion geometry (slow, √k-like spreading in bounded space), while edges constitute a chaotic bulk (fast mixing to equilibrium). The higher saturation level of the edge block (≈4.5 vs ≈3.3) further indicates greater mixing capacity and ergodicity in edge permutations. These scaling laws provide a geometric origin for the spectral stratification: slow layers arise from diffusion-like corner dynamics, fast layers from chaotic edge randomization."""
+    depths, mean_corner, mean_edge, std_corner, std_edge = compute_inter_state_block_distance(corner_idx, edge_idx,
+                                                                                              num_pairs_per_depth=300)
+    # model = SlowDynamics()
+    # simulate_block_dominated_evolution(model, corner_idx, edge_idx, T=100, num_trials=5)
     mask = np.abs(w - 1) < 1e-6
     V1 = V[:, mask]
     for i, v in enumerate(invariants):
@@ -1029,7 +1403,12 @@ if __name__ == '__main__':
         | 5/9 | 96 | 中速     |
         | 1/3 | 32 | 快速衰减   |
         λ ≥ 2/3 24 + 44 + 32 = 100
-        18-> 224 commutator set: 分母 ≈ 28 pattern：4 or 8 的倍数 span dimension = 180
+        
+        rank(generator algebra) ≈ 6 face turns
+        V = V_const ⊕ V_slow ⊕ V_fast
+        <20+64
+        Lie algebra generated by {ρ(g)} [ρ(g_i), ρ(g_j)] 不断闭包 只剩 4 维中心
+        18-> 224 commutator set: 224 = 8 × 28 分母 ≈ 28 pattern：4 or 8 的倍数 span dimension = 180
         谱更集中 k / 28 ，operator algebra 实际自由度只有：6,224-180：44 个线性依赖
         almost all multiples of 4
         1.0        20
@@ -1042,6 +1421,11 @@ if __name__ == '__main__':
         0.428571   24
         0.321429   24
         0.25        8
+        
+        18 generators
+        → span 18
+        → commutator closure 224
+        → representation dim 228
         """
 
     rank1 = np.linalg.matrix_rank(
@@ -1248,56 +1632,6 @@ if __name__ == '__main__':
     """slow operator rank = 6
     fast operator rank = 4
     """
-    for n in [18, 16, 12, 10, 9, 8, 6, 4, 3, 2]:
-        model = SlowDynamics(n=n)
-        unique, counts = np.unique(np.round(model.w, 6), return_counts=True)
-        gen = list(model.rho_moves(n=n).values())
-        m = len(gen) // 2
-        pred = [1 - k / m for k in range(m + 1)]
-        print('>-----', n, len(gen), pred)
-        print("dim span {ρ(g)}=", group_algebra_dim(gen),
-              slow_algebra_dimension(gen, model.V_slow))  # generator algebra dim = 18/12/6,face-turn group 的轴结构强相关
-        a_s = model.V_slow.T.conj() @ model.A_micro @ model.V_slow
-        print('rank:', poly_rank(model.A_micro), poly_rank(a_s))  # 6 5
-        for u, c in zip(unique[::-1], counts[::-1]):
-            print(u, c)
-
-    """attention-like generator mixing
-     The spectrum of the averaged generator operator follows a universal form
-    λ = 1 − k/m, where m is the number of generator axes.  
-    10 generators
-    1.0 52
-    0.8 36
-    0.6 64
-    0.4 68
-    0.2 8
-    6 generators dir=2 k/3
-    dim span {ρ(g)}= 6 6
-    rank: 5 4
-    1.0 72
-    0.666667 72
-    0.333333 84
-    6 generators axis=0
-    dim span {ρ(g)}= 6 1
-    rank: 4 2
-    1.0 100
-    0.5 8
-    0.333333 120
-    4 generators
-    1.0 100
-    0.5 80
-    0.25 8
-    0.0 40
-    
-    >----- 2 2
-    慢层生成代数维度 ≈ 1
-    dim span {ρ(g)}= 2 1
-    rank: 2 2
-    1.0 148
-    0.0 80
-    """
-
-    model = SlowDynamics(n=18)
     results, message = check_invariant_subspaces(A_micro, generators, w, V)
     print(message)
     for lam, res in results.items():
@@ -1306,7 +1640,7 @@ if __name__ == '__main__':
     """
     λ = 1.000000 (dim= 24) → 不变 (invariant)
     ------------------------------------------------------------
-    
+
     总结：5 个子空间中，有 1 个完全不变。
     并非所有子空间都完全不变，说明表示并非完全分解成 5 个 irreps。
     但慢层（λ ≥ 2/3）的不变性值得进一步关注。
@@ -1541,15 +1875,6 @@ if __name__ == '__main__':
     守恒层投影误差 (T=100): 1.390568e-06
     """
 
-    import matplotlib.pyplot as plt
-    import os
-
-    # Adjust these paths to match your actual Tcl/Tk directories
-    os.environ['TCL_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tcl8.6'
-    os.environ['TK_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tk8.6'
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
-
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     ax.plot(Z[:, 0], Z[:, 1], Z[:, 2], label='慢坐标轨迹')
@@ -1586,8 +1911,8 @@ if __name__ == '__main__':
     # 初始化模型
 
     # 选择最慢的模式（第一个列）
-    phi = model.V[:, 0]  # slowest eigenvector (228,)
-    lam = model.w[0]  # 对应特征值，通常 ≈1.0 或 7/9
+    phi = V[:, 0]  # slowest eigenvector (228,)
+    lam = w[0]  # 对应特征值，通常 ≈1.0 或 7/9
 
     # 采样状态和动作
     n_samples = 2000  # 建议 1000–5000
@@ -1646,7 +1971,7 @@ if __name__ == '__main__':
     plt.savefig("data/最慢模式 φ_1 的群谐函数误差分布.png", dpi=300, bbox_inches='tight')
     plt.show()
 
-    phis = model.V[:, 24:24 + 44]  # λ=7/9 block
+    phis = V[:, 24:24 + 44]  # λ=7/9 block
     # Gram matrix
     G = phis.T @ phis
     plt.figure(figsize=(12, 12))
@@ -1661,8 +1986,8 @@ if __name__ == '__main__':
     退化子空间内的 44 个向量是正交基,正交基保证了模式之间不耦合，泄漏主要来自 λ 间的谱间隙，而不是向量间的非正交性"""
     x = []
     y = []
-    phi1 = model.V[:, 24]  # λ=7/9
-    phi2 = model.V[:, 25]
+    phi1 = V[:, 24]  # λ=7/9
+    phi2 = V[:, 25]
     for _ in range(10000):
         s = CubieBase.generate_cubie(length=40)
         v = s.vector
@@ -1682,8 +2007,8 @@ if __name__ == '__main__':
     n_samples_per_mode = 2000  # 每个模式采样数
 
     # 预计算前 n_modes 个特征向量和特征值
-    phi_list = [model.V[:, start + i] for i in range(n_modes)]
-    lam_list = model.w[start:start + n_modes]
+    phi_list = [V[:, start + i] for i in range(n_modes)]
+    lam_list = w[start:start + n_modes]
 
     # 结果存储
     error_stats = []  # list of dict {'mode': i, 'mean': , 'std': , 'max_abs': }
@@ -1793,8 +2118,8 @@ if __name__ == '__main__':
     n_samples_per_mode = 2000  # 每个模式采样数
 
     # 预计算前 n_modes 个特征向量和特征值
-    phi_list = [model.V[:, start + i] for i in range(n_modes)]
-    lam_list = model.w[start:start + n_modes]
+    phi_list = [V[:, start + i] for i in range(n_modes)]
+    lam_list = w[start:start + n_modes]
 
     # 结果存储
     error_stats = []  # list of dict {'mode': i, 'mean': , 'std': , 'max_abs': }
@@ -1982,193 +2307,6 @@ if __name__ == '__main__':
     plt.legend()
     plt.show()
 
-    print("开始生成随机状态对并计算距离...")
-    n_pairs = 5000
-    depth = (5, 10, 20, 30)
-    mask_nc = (model.w_slow < 0.999) & (model.w_slow > 2 / 3)
-    w_nc = np.real(model.w_slow[mask_nc])
-    CubieBase.build_pruning_table()
-    for dh in depth:
-        d1_list = []
-        d2_list = []
-        for i in range(n_pairs):
-            if i % 500 == 0:
-                print(f"已处理 {i}/{n_pairs} 对...")
-
-            # stateA, stateB = CubieBase.generate_cubie_pair(depth_range=(18, 22))
-            stateA = CubieBase.generate_cubie(dh)
-            stateB = CubieBase.generate_cubie(dh)
-            # 真实近似深度
-            stateC = CubieMove.relative_state(stateA, stateB)
-
-            phase, d1 = CubieBase.cubie_distance(stateC)
-            # hybrid_d = d1 + α * phase
-            # 慢投影距离
-            # delta_rho = stateC.vector
-            d2 = model.heuristic(stateA.vector, stateB.vector,False)
-            # z = z_delta[mask_nc].real
-            # weights = 1 / (1 - w_nc)
-            # d2 = np.sqrt(np.sum((z ** 2) * weights))  # np.abs(z)
-
-            d1_list.append(d1)
-            d2_list.append(d2)
-
-        # 转换为 numpy 数组
-        d1_arr = np.array(d1_list)
-        d2_arr = np.array(d2_list)
-
-        # 计算相关系数
-        pearson_corr, pearson_p = pearsonr(np.log(d1_arr + 1), d2_arr)
-        spearman_corr, spearman_p = spearmanr(d1_arr, d2_arr)
-
-        print(f"\n{dh}相关系数结果：")
-        print(f"Pearson 相关系数: {pearson_corr:.4f} (p-value: {pearson_p:.2e})")
-        print(f"Spearman 秩相关系数: {spearman_corr:.4f} (p-value: {spearman_p:.2e})")
-        print("std d1", np.std(d1_arr), "std d2", np.std(d2_arr))
-        """
-        dh 随机0-30：
-        Pearson 相关系数: 0.5081 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.3636 (p-value: 3.56e-156)
-        slow manifold 捕捉到了宏观难度
-        10相关系数结果：
-        Pearson 相关系数: 0.2480 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.1743 (p-value: 2.04e-35)
-        std d1 0.7793588133844385 std d2 0.6538328
-        20相关系数结果：
-        Pearson 相关系数: 0.0622 (p-value: 1.07e-05)
-        Spearman 秩相关系数: 0.0541 (p-value: 1.29e-04)
-        30相关系数结果：
-        Pearson 相关系数: 0.0291 (p-value: 3.97e-02)
-        Spearman 秩相关系数: 0.0270 (p-value: 5.61e-02)
-        std d1 0.6713896037324378 std d2 0.5729763
-        
-        Pearson 相关系数: 0.5968 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.2613 (p-value: 7.38e-79)
-        corr = corrcoef(
-        cube_distance(A,B),
-        slow_distance(A,B)
-        
-        Rubik 群的随机游走在大约：15 ~ 20 moves 后就会接近 混合状态。
-        slow manifold 对“远距离状态”区分能力下降
-        slow spectral embedding ≈ 局部搜索结构
-        10 步以内影响巨大,小深度区域：state space 非常稀疏
-        """
-
-        # 画散点图
-        plt.figure(figsize=(12, 8))
-        plt.scatter(np.log(d1_arr + 1), d2_arr, alpha=0.6, s=10, c='blue', edgecolor='none')
-        plt.xlabel("prune heuristic 真实距离 d1 log")
-        plt.ylabel("慢投影距离 d2 = ||V_slowᵀ (ρ(A) - ρ(B))||")
-        plt.title(f"慢投影距离 vs 真实距离 (d={dh} n={n_pairs} 对)")
-        plt.grid(True, alpha=0.3)
-
-        # 添加相关系数文本
-        plt.text(0.05, 0.95, f"Pearson r = {pearson_corr:.4f}\nSpearman r = {spearman_corr:.4f}",
-                 transform=plt.gca().transAxes, fontsize=12, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        plt.tight_layout()
-        plt.savefig(f"data/慢投影距离_真实距离_d{dh}.png", dpi=300, bbox_inches='tight')
-        plt.show()
-
-    d_ratios = []
-    rho_solved = CubieState.solved().vector  # 或 solved.to_rho()，取决于你用的是 vec 还是 rho
-    z_solved = model.project(rho_solved)
-    for _ in range(1000):
-        # 随机 g（从 moves 中随机走几步）
-        A = CubieBase.generate_cubie()
-        rho_A = A.vector
-        z_A = model.project(rho_A)
-
-        g = CubieBase.random_walk(length=5)  # 短路径随机 g
-        # g.act(A).vector
-        rho_g = g.rho()
-
-        # 变换后状态
-        rho_A_g = rho_g @ rho_A
-        z_A_g = model.project(rho_A_g)
-
-        # 原距离 vs 变换后距离
-        d_orig = model.distance(z_A, z_solved)
-        d_trans = model.distance(z_A_g, z_solved)
-
-        ratio = d_trans / (d_orig + 1e-10)  # 避免除 0
-        d_ratios.append(ratio)
-
-    # 统计
-    mean_ratio = np.mean(d_ratios)
-    std_ratio = np.std(d_ratios)
-    print(f"平均 d(ρ(g)x, ρ(g)y) / d(x,y) = {mean_ratio:.4f} ± {std_ratio:.4f}")
-    """平均 d(ρ(g)x, ρ(g)y) / d(x,y) = 1.0059 ± 0.0871
-    slow embedding 在群作用下是否等距:满足：统计等距 (statistical isometry)
-    而不是严格等距 (exact isometry)
-    说明 d(z) 对群变换鲁棒，可作为可靠的到 solved 距离代理。
-    慢投影距离 d(z) 在群作用下具有准等距性（quasi-isometry），即
-    d(ρ(g)x, ρ(g)y) ≈ d(x,y)
-    误差仅在 ±8–9% 内波动，远小于随机扰动或非对称表示常见的 30–50% 偏差。这说明：
-    慢子空间基本保留了群作用的几何结构（距离关系）。
-    d(z) 可以作为到 solved 的可靠下界或代理距离（admissible heuristic），用于 A*/IDA* 搜索。
-    """
-
-    # 画分布
-    plt.figure(figsize=(12, 8))
-    plt.hist(d_ratios, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black')
-    plt.axvline(1.0, color='red', ls='--', label='理想保距 (ratio=1)')
-    plt.axvline(mean_ratio, color='orange', ls='-', label=f'平均比率 {mean_ratio:.4f}')
-    plt.xlabel("比率 d_trans / d_orig")
-    plt.ylabel("密度")
-    plt.title("慢投影距离在群作用下的保距性分布 (1000 次采样)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("data/慢投影距离在群作用下的保距性分布.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    d_ratios = []
-    for _ in range(3000):
-        A, B = CubieBase.generate_cubie_pair()
-
-        rho_A = A.vector
-        rho_B = B.vector
-
-        z_A = model.project(rho_A)
-        z_B = model.project(rho_B)
-
-        g = CubieBase.random_walk(length=5)
-        rho_g = g.rho()
-
-        z_A_g = model.project(rho_g @ rho_A)
-        z_B_g = model.project(rho_g @ rho_B)
-
-        d_orig = model.distance(z_A, z_B)
-        d_trans = model.distance(z_A_g, z_B_g)
-
-        ratio = d_trans / (d_orig + 1e-10)
-        d_ratios.append(ratio)
-
-    mean_ratio = np.mean(d_ratios)
-    std_ratio = np.std(d_ratios)
-    print(f"平均 d(ρ(g)x, ρ(g)y) / d(x,y) = {mean_ratio:.4f} ± {std_ratio:.4f}")
-    """平均 d(ρ(g)x, ρ(g)y) / d(x,y) = 1.0003 ± 0.0144"""
-
-    plt.figure(figsize=(12, 8))
-    plt.hist(d_ratios, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black')
-    plt.axvline(1.0, color='red', ls='--', label='理想保距 (ratio=1)')
-    plt.axvline(mean_ratio, color='orange', ls='-', label=f'平均比率 {mean_ratio:.4f}')
-    plt.xlabel("比率 d_trans / d_orig")
-    plt.ylabel("密度")
-    plt.title("群作用是否保持 slow metric (3000 次采样 近似保距)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("data/slow 投影下的距离近似保距.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    """
-    slow manifold 上的群作用几乎是正交的，因此 slow embedding 近似保持 Rubik cube 的群距离结构
-    近似群不变的
-    slow embedding respects group action.
-    """
 
     idx = np.argsort(np.real(w))[::-1]
     w = w[idx]
@@ -2293,11 +2431,6 @@ if __name__ == '__main__':
         print(np.linalg.norm(v_s), np.linalg.norm(v_f))  # 多谱结构
 
     slow_in_block = U.T.conj() @ slow_basis
-
-    blocks = detect_blocks(samples, U)
-    sizes = [len(b) for b in blocks]
-    print("Block sizes:", sorted(sizes))  # ..., 64, 144
-    print("Number of blocks:", len(blocks))
 
     A = sum(c_i * mv_i.rho() for mv_i, c_i in zip(samples, np.random.randn(len(samples))))
     B = sum(c_i * mv_i.rho() for mv_i, c_i in zip(samples, np.random.randn(len(samples))))
