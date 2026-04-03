@@ -396,7 +396,7 @@ class RubiksCubeDraw:
                 self.renderer.commit_partial()
                 self.current_anim = None
 
-    # Mouse helpers (view drag + face drag)
+    # Mouse helpers.py (view drag + face drag)
     def handle_mouse_down(self, pos, button):
         if button == 1:  # left
             # start potential face drag or view drag

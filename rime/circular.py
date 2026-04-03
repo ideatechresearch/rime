@@ -869,7 +869,7 @@ if __name__ == "__main__":
 
     print("\n数据持久化:")
     band.save("circular_data.pkl")
-    loaded_band = CircularBand.load("circular_data.pkl")
+    loaded_band = CircularBand.load("data/circular_data.pkl")
     print("加载后的数据:", loaded_band)  # A → B → [C] → D → E → [A]...
 
     print("\n容量限制:")

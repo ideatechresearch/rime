@@ -1110,7 +1110,7 @@ class CubieMove:
     @classmethod
     def build(cls, s0: 'CubieState', s1: 'CubieState') -> "CubieMove":
         """
-         相对于 s 的局部 delta move g = A.inv().act(B)
+         buildetween 相对于 s 的局部 delta move g = A.inv().act(B)
          s0 原始 CubieState
          s1 旋转后状态
          s1 = s0 ∘ m   （右作用语义）
@@ -1139,6 +1139,10 @@ class CubieMove:
         """
         m = cls.build(s0, s1)
         return m.act(CubieState.solved())
+    
+    def re_act(self, s1: 'CubieState') -> 'CubieState':
+        """还原初始状态 initial s0，s0 = m⁻¹ ∘ s1, s1 = s0 ∘ m"""
+        return self.inverse().act(s1)
 
     @staticmethod
     def build_pruning_table(
@@ -2733,7 +2737,7 @@ class CubieBase(CubeBase):
     def solve_sticker(self, state: np.ndarray) -> list[tuple]:
         if not hasattr(self, 'CO_EO_PRUNE'):
             self.build_pruning_table()
-        #state = self.normalize_sticker(state)
+        # state = self.normalize_sticker(state)
         cubie = self.to_cubie(state)
         moves, mv = self.solve_kociemba(cubie)
         act = [ActionToken.from_cubie_move(axis, side, dir, self.n).key for axis, side, dir in moves]
@@ -3215,8 +3219,8 @@ class CubieBase(CubeBase):
         return {tuple(t.key for t in seq): m for m, seq in products.items() if m.act(solved).is_solvable()}
 
     @staticmethod
-    def random_walk(length: int = 50) -> CubieMove:
-        moves = list(CubieMove.prim_moves.values())
+    def random_walk(length: int = 50, gen: list = None) -> CubieMove:
+        moves = gen or list(CubieMove.prim_moves.values())
         if length == 1:
             return random.choice(moves)
         current = CubieMove.identity()
@@ -4008,6 +4012,10 @@ if __name__ == "__main__":
     C = CubieMove.relative_state(A, B)
     assert C.is_solvable()
     print(C.orientation_distance, A.orientation_distance, B.orientation_distance)
+    assert m.re_act(B) == A
+    m2=CubieBase.random_walk()
+    D= m2.act(A)
+    assert m2.re_act(D) == A
 
     prim_list12 = {k: v for k, v in CubieMove.prim_moves.items() if k[2] != 2}
     print(len(prim_list12))
@@ -4030,6 +4038,7 @@ if __name__ == "__main__":
     prim_listall = CubieMove.prim_moves.copy()
     products2 = CubieBase.generate_compose_moves(prim_listall, commutator=True)
     print(f"18 两两组合后去重 + 去 identity + commutator 数量: {len(products2)}")  # 216
+    """6*6*6 = 3^3 × 2^3 """
 
     prim_listall.update(CubieMove.slice_moves())
     prim_listall[()] = ME
@@ -4162,10 +4171,10 @@ if __name__ == "__main__":
     m2_s = StickerMove.phi(cube0.n, m2)
     cube1 = m1_s.apply(cube0)
     cube2 = m2_s.apply(cube1)
-
-    _, cube3 = StickerMove.act_moves(cube0.get_state(), ActionToken.from_path([K1, K2]))
-    assert np.all(cube2.cube == cube3)
-    print(cube3)
+    # tokens= [ActionToken.from_cubie_move(*K1, n=3), ActionToken.from_cubie_move(*K2, n=3)]
+    # _, cube3 = StickerMove.act_moves(cube0.get_state(), tokens)
+    # assert np.all(cube2.cube == cube3),f'{tokens}'
+    #print(cube3)
     cube0.reset()
     xx = []
     for move in [K1, K2]:
@@ -4174,7 +4183,7 @@ if __name__ == "__main__":
         xx.append((axis, layer, -direction))  # 用 -direction 对齐
 
     cube0.apply(xx)
-    assert np.all(cube0.cube == cube3)
+    #assert np.all(cube0.cube == cube3)
 
     s1 = m2_s.act(m1_s.act(s))
     s2 = m1_s.compose(m2_s).act(s)

@@ -1304,8 +1304,8 @@ class CubeBase:
             print(f"接近万向节锁! ay={ay} 接近 ±90°")
         return Rz @ Ry @ Rx  # 从右向左执行，实际顺序是 X -> Y -> Z
 
-    @staticmethod
-    def generate_rotations() -> list[np.ndarray]:
+    @class_property
+    def generate_rotations(cls) -> list[np.ndarray]:
         """生成所有：3x3 正交矩阵，直接用于坐标变换,24 个 SO(3) 旋转"""
         # rot_x_90 = CubeBase.rot90_matrix(0, 1)
         # rot_y_90 = CubeBase.rot90_matrix(1, 1)
@@ -1320,6 +1320,7 @@ class CubeBase:
                     M[i, perm[i]] = signs[i]
                 if np.linalg.det(M) == 1:  # and np.allclose(M @ M.T, np.eye(3))
                     mats.append(M)
+
         return mats  # 24 个
 
     @classmethod

@@ -6,17 +6,22 @@ RIME 是一个跨领域的 Python 数学建模与计算框架，涵盖魔方求�
 
 ```
 rime/
-├── base.py          # 基础工具类：属性代理、类属性缓存装饰器
-├── allele.py        # 遗传学：ABO血型系统建模、基因型/表现型计算
+├── base.py          # 基础工具类：属性代理、类属性缓存装饰器、链式调用
+├── allele.py        # 遗传学：ABO血型系统建模、基因型/表现型计算、群体遗传学
 ├── circular.py      # 环形数据结构、矩阵面操作、金字塔投影
 ├── pyramid.py       # 金字塔神经网络、旋转对称矩阵变换
 ├── cube.py          # 魔方建模：NxN魔方贴纸级状态表示与基础求解
 ├── cubie.py         # 魔方建模：块级群论建模、Kociemba两阶段算法
 ├── cubieoperator.py # 群表示论：魔方群的表示分析、Bose-Mesner代数验证
-├── cubeworld.py     # 魔方世界：贴纸-群论双层模型、神经网络rank critic
+├── cubieworld.py    # 慢动力学：Phase-1转移算符谱分析、慢流形、群谐函数
 ├── cubedraw.py      # 魔方可视化：Pygame 3D渲染与交互
+├── cubedrawgl.py    # 魔方可视化：OpenGL 3D渲染
+├── cubeplot.py      # 数据可视化：训练曲线、角向低秩分析
+├── cubelearn.py     # 学习模型：CubeEnv环境、RankingCritic、Phase15Critic
 ├── dice.py          # 骰子特征分析、游戏触发器规则
-└── body.py          # 遗传进化：人类血型遗传、新颖性搜索算法
+├── body.py          # 遗传进化：人类血型遗传、新颖性搜索算法
+├── helpers.py       # 辅助工具：DBSCAN聚类、K-means、余弦相似度、softmax
+└── option.py        # 配置选项：全局参数管理
 ```
 
 ## 主要模块
@@ -186,6 +191,25 @@ app.run()
 - `S`: 生成并播放打乱序列
 - `R`: 重置魔方
 
+### 3.1 OpenGL 可视化 ([cubedrawgl.py](rime/cubedrawgl.py))
+
+基于 OpenGL 的 3D 魔方可视化系统。
+
+**功能：**
+- 硬件加速的 3D 渲染
+- 平滑的旋转动画
+- 实时交互控制
+
+### 3.2 数据可视化 ([cubeplot.py](rime/cubeplot.py))
+
+魔方学习与谱分析的可视化工具。
+
+**功能：**
+- 训练曲线绘制
+- 角向低秩结构可视化
+- 谱分析结果展示
+- 相位空间投影
+
 ### 4. 群表示论系统 ([cubieoperator.py](rime/cubieoperator.py))
 
 魔方群的表示论分析与 Bose-Mesner 代数验证。
@@ -212,9 +236,49 @@ app.run()
 - 快层谱半径 ≈ 5/9，20–23 步内充分衰减
 - 准等距距离: d(x,y) = ||V_slowᵀ(x-y)||，误差 1.0059 ± 0.0871
 
-### 5. 魔方世界模型 ([cubeworld.py](rime/cubeworld.py))
+### 5. 慢动力学模型 ([cubieworld.py](rime/cubieworld.py))
 
-贴纸-群论双层世界模型与神经网络 rank critic。
+Phase-1 转移算符谱分析与慢流形建模。
+
+**核心特性：**
+- 228 维群表示的谱分层：5 个有理特征值层 {1, 7/9, 2/3, 5/9, 1/3}
+- 慢子空间（λ ≥ 2/3）：100 维准不变子空间
+- 快子空间（λ < 2/3）：128 维，谱半径 ≈ 5/9
+- 双时间尺度系统：边块混合 ≈ 5 步，角块混合 ≈ 20 步
+- 群谐函数：前 8 个模式精确谐（误差=0）
+
+**核心类：**
+- `SlowDynamics`: 慢动力学模型，支持投影、演化、重构、启发式距离
+- 谱分解：`A = (1/|S|)∑ρ(s)` → Σ λ_i E_i
+- 维度分布：守恒 24，慢模 44，次慢 32，中速 96，快速 32
+
+```python
+from rime.cubieworld import SlowDynamics, CubieMove, CubieState
+
+# 构建慢动力学模型
+model = SlowDynamics.from_phase1_generators(n_generators=18)
+
+# 状态投影到慢子空间
+state = CubieState.solved()
+vec = state.to_rho()  # 228 维表示
+z = model.project(vec)  # (100,) 慢子空间
+
+# 慢子空间演化
+z_t = model.evolve(z, T=10)
+x_t = model.reconstruct(z_t)
+
+# 计算慢子空间距离（启发式）
+distance = model.heuristic(vec_a, vec_b)
+```
+
+**算法意义：**
+- 准等距距离启发式：d(x,y) = ||V_slowᵀ(x-y)||，误差 1.0059 ± 0.0871
+- 可用于 A*/IDA* 搜索、生成慢距离 scramble、低秩模拟
+- 有效动力学维度 ≈ 5–6，由 rank-6 attention operator 控制
+
+### 6. 魔方学习模型 ([cubelearn.py](rime/cubelearn.py))
+
+贴纸-群论双层世界模型与神经网络学习系统。
 
 **核心架构：**
 ```
@@ -239,7 +303,7 @@ app.run()
 - 慢流形捕捉到宏观难度，但对远距离状态区分能力下降
 - 群表示在线性可学，move norm 稳定 (≈ 6.3)
 
-### 6. 遗传学系统 ([allele.py](rime/allele.py))
+### 8. 遗传学系统 ([allele.py](rime/allele.py))
 
 完整的 ABO 血型系统遗传学建模。
 
@@ -269,7 +333,7 @@ compatible = Allele.is_compatible_phenotype('O', 'A')  # True
 - 遗传概率矩阵：支持基因型和表现型两层概率
 - 群体频率：Hardy-Weinberg 平衡计算
 
-### 7. 环形数据结构 ([circular.py](rime/circular.py))
+### 9. 环形数据结构 ([circular.py](rime/circular.py))
 
 支持动态游标、容量限制、持久化的环形数据结构。
 
@@ -291,7 +355,7 @@ band.transpose(4)  # 块转置
 - 支持 4 象限旋转对称切分
 - 可逆变换：band ↔ matrix ↔ 3d blocks
 
-### 8. 金字塔神经网络 ([pyramid.py](rime/pyramid.py))
+### 10. 金字塔神经网络 ([pyramid.py](rime/pyramid.py))
 
 基于递增环和旋转对称结构的混合神经网络架构。
 
@@ -315,7 +379,7 @@ outputs = nn.forward_pyramid(encoded_bands)
 - 层间交叉注意力
 - 支持 band 编码与嵌入学习
 
-### 9. 骰子特征系统 ([dice.py](rime/dice.py))
+### 11. 骰子特征系统 ([dice.py](rime/dice.py))
 
 三骰子游戏特征分析与触发器系统。
 
@@ -338,7 +402,7 @@ features = dice_feature_game((4, 4, 4))
 | 极限呈现 | 总和 > 16 | 极限表现 |
 | 保底 | 1,2,3 顺子 | 稳定输出 |
 
-### 10. 进化算法 ([body.py](rime/body.py))
+### 12. 进化算法 ([body.py](rime/body.py))
 
 遗传进化与新颖性搜索算法实现。
 
@@ -347,10 +411,40 @@ features = dice_feature_game((4, 4, 4))
 - `NoveltySearch`: 新颖性搜索算法
 - `Individual`: 进化个体
 
+### 13. 辅助工具 ([helpers.py](rime/helpers.py))
+
+常用机器学习与数据处理工具。
+
+**功能：**
+- `dbscan()`: DBSCAN 聚类算法实现
+- `kmeans()`: K-means 聚类算法（支持 kmeans++ 初始化）
+- `cosine_similarity()`: 余弦相似度计算
+- `softmax()`: Softmax 函数
+
+```python
+from rime.helpers import dbscan, kmeans, cosine_similarity, softmax
+
+# DBSCAN 聚类
+labels = dbscan(X, eps=0.5, min_samples=5)
+
+# K-means 聚类
+centroids, labels = kmeans(X, k=3, init="kmeans++")
+
+# 余弦相似度
+sim = cosine_similarity(vectors_a, vectors_b)
+
+# Softmax
+probs = softmax(logits)
+```
+
+### 14. 配置管理 ([option.py](rime/option.py))
+
+全局参数配置与管理。
+
 ## 依赖项
 
 ```bash
-pip install numpy pygame scipy torch scikit-learn joblib matplotlib
+pip install numpy pygame scipy torch scikit-learn joblib matplotlib pandas sympy PyOpenGL
 ```
 
 - `numpy`: 数值计算、数组操作
@@ -360,6 +454,41 @@ pip install numpy pygame scipy torch scikit-learn joblib matplotlib
 - `scikit-learn`: 机器学习工具（PCA、TSNE 等）
 - `joblib`: 数据序列化（缓存剪枝表、数据集）
 - `matplotlib`: 数据可视化
+- `pandas`: 数据处理与分析
+- `sympy`: 符号计算
+- `PyOpenGL`: OpenGL 3D 渲染
+- `openai`: AI 模型集成
+- `frozenlist`: 不可变列表数据结构
+
+## 安装
+
+### 方式一：从 requirements.txt 安装
+
+```bash
+pip install -r requirements.txt
+```
+
+### 方式二：逐个安装依赖
+
+```bash
+pip install numpy>=2.1.3
+pip install pandas>=2.2.3
+pip install scipy>=1.16.0
+pip install torch>=2.10.0
+pip install matplotlib>=3.10.3
+pip install scikit-learn
+pip install pygame==2.6.1
+pip install PyOpenGL==3.1.10
+pip install joblib==1.5.3
+pip install sympy==1.14.0
+pip install openai==1.63.2
+```
+
+### 可选：从 pyproject.toml 安装
+
+```bash
+pip install -e .
+```
 
 ## 快速开始
 
@@ -368,6 +497,28 @@ pip install numpy pygame scipy torch scikit-learn joblib matplotlib
 ```bash
 python -m rime.cube
 python -m rime.cubedraw
+```
+
+### 慢动力学分析
+
+```python
+from rime.cubieworld import SlowDynamics, CubieMove, CubieState
+
+# 构建慢动力学模型
+model = SlowDynamics.from_phase1_generators(n_generators=18)
+
+# 分析两个状态的距离
+state_a = CubieState.solved()
+state_b = CubieMove.from_rotation(0, 1, 1).act(state_a)
+
+# 投影到慢子空间
+vec_a = state_a.to_rho()
+vec_b = state_b.to_rho()
+z_a = model.project(vec_a)  # (100,) 慢子空间
+z_b = model.project(vec_b)
+
+# 计算慢子空间距离（启发式）
+slow_distance = model.heuristic(vec_a, vec_b)
 ```
 
 ### 魔方块级求解
@@ -423,7 +574,8 @@ matrix = pyramid.to_matrix(fill_center_with=('O', 'O'))
 
 ```python
 from rime.cubieoperator import detect_blocks, verify_association_scheme
-from rime.cubie import CubieMove, SlowDynamics, CubieState
+from rime.cubieworld import SlowDynamics
+from rime.cubie import CubieMove, CubieState
 import numpy as np
 
 # 获取 Phase-1 生成元
@@ -457,7 +609,7 @@ x_t = model.reconstruct(z_t)
 ### 魔方世界模型
 
 ```python
-from rime.cubeworld import CubeEnv, Phase15Critic, train_ranking_critic_15
+from rime.cubelearn import CubeEnv, Phase15Critic, train_ranking_critic_15
 from rime.cubie import CubieBase
 
 # 创建环境
@@ -542,14 +694,16 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 
 ## 项目特点
 
-1. **跨学科融合**: 涵盖群论、遗传学、金字塔神经网络、游戏触发器、表示论、谱动力学
+1. **跨学科融合**: 涵盖群论、遗传学、金字塔神经网络、游戏触发器、表示论、谱动力学、机器学习
 2. **双重建模**: 贴纸级与块级魔方建模，双向可逆转换
 3. **严格的数学基础**: 基于群论的魔方建模、基于孟德尔定律的遗传计算、Bose-Mesner 代数验证
 4. **高效算法**: Kociemba 两阶段算法、剪枝表优化、群同态投影、慢流形分析
 5. **谱动力学**: 228 维群表示的 5 层谱分解，100 维慢子空间准等距距离启发式
 6. **神经网络支持**: Ranking Critic、Phase-1.5 评估网络、李代数群表示、结构化 Move 层
-7. **可视化支持**: Pygame 3D 渲染、实时交互、训练曲线可视化
+7. **可视化支持**: Pygame 3D 渲染、OpenGL 硬件加速、实时交互、训练曲线可视化
 8. **扩展性设计**: 支持自定义阶魔方、血型系统、金字塔层数、群表示维度
+9. **辅助工具**: DBSCAN、K-means、余弦相似度、softmax 等常用机器学习工具
+10. **数据持久化**: 支持剪枝表缓存、类属性缓存、数据集持久化
 
 ## 许可证
 
@@ -558,3 +712,37 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request。
+
+## 最佳实践
+
+### 首次运行剪枝表构建
+
+首次使用魔方块级求解时，需要构建剪枝表（约耗时 10-20 秒）：
+
+```python
+from rime.cubie import CubieBase
+
+# 构建剪枝表（数据会缓存到 data/ 目录）
+CubieBase.build_pruning_table()
+```
+
+### 数据缓存
+
+项目支持多种数据缓存机制：
+
+- **剪枝表**: 自动缓存到 `data/` 目录
+- **类属性缓存**: 使用 `@class_cache` 装饰器
+- **数据集持久化**: 使用 `joblib.dump/load` 序列化
+
+### 可视化选择
+
+- **Pygame** ([cubedraw.py](rime/cubedraw.py)): 适合交互式魔方操作
+- **OpenGL** ([cubedrawgl.py](rime/cubedrawgl.py)): 适合高性能 3D 渲染
+- **数据绘图** ([cubeplot.py](rime/cubeplot.py)): 适合分析和结果展示
+
+### 性能优化建议
+
+1. 使用块级求解（[cubie.py](rime/cubie.py)）而非贴纸级（[cube.py](rime/cube.py)）以获得更好的性能
+2. 利用慢动力学模型的启发式距离加速搜索
+3. 启用剪枝表缓存以避免重复计算
+4. 对于大规模数据集，使用 `joblib` 进行并行处理
