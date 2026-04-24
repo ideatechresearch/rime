@@ -1,5 +1,6 @@
 import numpy as np
-from scipy.linalg import sqrtm, logm
+from scipy.linalg import sqrtm, logm, expm
+from collections import Counter
 
 
 def dbscan(X, eps=0.5, min_samples=5):
@@ -111,9 +112,11 @@ def cosine_similarity(ndarr1, ndarr2):
         similarity = np.where(denominator != 0, dot_product / denominator, 0)
     return similarity
 
-#from sklearn.metrics.pairwise import cosine_distances  
+
+# from sklearn.metrics.pairwise import cosine_distances
 def cosine_distance(a, b):
     return 1.0 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+
 
 # from scipy.special import softmax
 def softmax(x):
@@ -123,18 +126,42 @@ def softmax(x):
     e_x = np.exp(x - np.max(x, axis=1, keepdims=True))  # 对每行减去最大值
     return e_x / np.sum(e_x, axis=1, keepdims=True)
 
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
 
-def fidelity(rho, sigma):
+def sigmoid(x):
+    return 1.0 / (1 + np.exp(-x))
+
+
+def normalize_p(x):
+    """分位数标准化"""
+    x = (x - np.percentile(x, 50)) / (np.percentile(x, 90) - np.percentile(x, 10) + 1e-8)
+    return x
+
+
+def normalize_z(x):
+    """Z-score"""
+    return (x - x.mean()) / (x.std() + 1e-6)
+
+
+def von_neumann_entropy(rho):
+    """
+    S = -Tr(ρ ln ρ) 冯纽曼熵 在纯态下取值为零,
+    rho_b:规划空间的混乱程度，越高说明想象力越丰富、决策越不确定
+    """
+    w = np.linalg.eigvalsh(rho)
+    w = w[w > 1e-12]
+    return -np.sum(w * np.log(w)) if len(w) > 0 else 0.0
+
+
+def fidelity(rho, sigma, eps=1e-8):
     """
     计算两个密度矩阵的保真度 F(ρ, σ) = [Tr √(√ρ σ √ρ)]²
     重叠程度，越接近1越相似
     """
-    # 加小正则化防止数值问题
-
-    sqrt_rho = sqrtm(rho)  # matrix_sqrt(rho)
-    middle = sqrt_rho @ sigma @ sqrt_rho.conj().T
+    # 正则化（防止特征值过小导致 sqrtm 失败）
+    rho_reg = rho + eps * np.eye(rho.shape[0])
+    sigma_reg = sigma + eps * np.eye(sigma.shape[0])
+    sqrt_rho = sqrtm(rho_reg)  # matrix_sqrt(rho)
+    middle = sqrt_rho @ sigma_reg @ sqrt_rho.conj().T
     sqrt_middle = sqrtm(middle)
     fid = np.real(np.trace(sqrt_middle)) ** 2
     return np.clip(fid, 0.0, 1.0)
@@ -165,6 +192,21 @@ def quantum_cross_entropy(rho, sigma, eps=1e-10):
     return max(cross_ent, 0.0)  # 不对称
 
 
+def time_evolution(H, psi0, t_list, hbar=1.0):
+    """
+    求解时间相关薛定谔方程：iℏ∂ψ/∂t = Hψ
+    使用形式解：ψ(t) = exp(-iHt/ℏ) ψ(0)
+    """
+    psi_t = []
+    for t in t_list:
+        # 时间演化算符 U(t) = exp(-iHt/ℏ)
+        U = expm(-1j * H * t / hbar)
+        psi = U @ psi0
+        psi_t.append(psi)
+
+    return np.array(psi_t)
+
+
 def rho_sigreg(rho, num_projections=32, lambda_reg=0.08):
     """
     强制 latent embedding 的随机投影接近各向同性高斯分布，从而防止 collapse（所有表示坍缩到同一个点或极端纯态）
@@ -182,6 +224,192 @@ def rho_sigreg(rho, num_projections=32, lambda_reg=0.08):
 
         # 希望 proj 接近标准正态分布的统计特性（均值0，方差1）
         # 用简单的平方惩罚（接近 LeCun 的 sketched Gaussian 思想）
+        # mean_loss = (proj - 1.0 / dim) ** 2
+        # var_loss = (proj**2 - 1.0 / dim) ** 2
         total += (proj - 0.5) ** 2 + 0.1 * (proj ** 2 - 1.0) ** 2
 
     return lambda_reg * (total / num_projections)
+
+
+def sinkhorn_basic(matrix: np.ndarray, max_iter: int = 300, tol: float = 1e-4, epsilon=1e-8):
+    """
+    基础Sinkhorn算法：将非负方阵转换为双随机矩阵
+
+    参数:
+        matrix: 输入的非负方阵 (n x n)
+        max_iter: 最大迭代次数
+        tol: 收敛容差（行/列和与1的最大允许偏差）
+        epsilon: 小常数，防止除零
+
+    返回:
+        P: 双随机矩阵
+        n_iter: 实际迭代次数
+        err: 最终误差
+    """
+    A = matrix.copy().astype(np.float64)
+
+    # 确保非负并添加小常数避免除零
+    A = np.maximum(A, 0) + epsilon
+
+    for i in range(max_iter):
+        # 行归一化
+        row_sums = A.sum(axis=1, keepdims=True)
+        A /= row_sums
+
+        # 列归一化
+        col_sums = A.sum(axis=0, keepdims=True)
+        A /= col_sums
+
+        # 检查收敛：计算行和与列和与1的最大偏差
+        row_err = np.max(np.abs(A.sum(axis=1) - 1))
+        col_err = np.max(np.abs(A.sum(axis=0) - 1))
+        err = max(row_err, col_err)
+
+        if err < tol:
+            return A, i + 1, err
+
+    print(f"警告：未在 {max_iter} 次迭代内收敛，最终误差: {err:.2e}")
+    return A, max_iter, err
+
+
+def get_probability(data: list | tuple | dict, output_format: str = "probs", sort: bool = False) -> dict:
+    """
+    统计列表中的元素频率，并支持不同的输出格式。
+
+    :param data: 输入的列表,possibilities
+    :param output_format: 输出格式，可选值：
+        - "counter": 返回 Counter 统计的字典
+        - "probability": 返回归一化的概率字典,normalize
+    :param sort: 按值从大到小排序
+    :return: 对应格式的统计结果
+    """
+    ct = data.copy() if isinstance(data, dict) else Counter(data)
+    if output_format == "counter":
+        if sort:
+            ct = sorted(ct.items(), key=lambda x: x[1], reverse=True)
+        return dict(ct)
+
+    if output_format in ("probs", "probability"):
+        total = sum(ct.values())
+        if total == 0:
+            return {}
+        probs = {key: value / total for key, value in ct.items()}
+        if sort:
+            return dict(sorted(probs.items(), key=lambda x: x[1], reverse=True))
+        return probs
+
+    raise ValueError("Invalid output_format. Choose from  'counter' or 'probability'.")
+
+
+def normalize_weights(items: list | tuple, weights: dict | list | tuple | float | int) -> list:
+    """
+    将多种形式的权重输入统一为与 items 对齐的概率列表。
+
+    :param items: 要采样的元素序列
+    :param weights: 输入权重，可以是 dict / list / tuple / float / int / None
+    :return: 概率（未必归一化，但可直接用于 random.choices / np.random.choice）
+    """
+    n = len(items)
+    # weights 是数字 → 均匀随机
+    if isinstance(weights, (float, int)):
+        probabilities = [1.0 / n] * n
+    elif isinstance(weights, (list, tuple)):
+        if len(weights) != n:
+            raise ValueError(f"权重长度 {len(weights)} 与元素数 {n} 不匹配")
+        probabilities = list(weights)
+    elif isinstance(weights, dict):  # 处理缺失的权重
+        probabilities = [weights.get(x, 0.0) for x in items]
+    else:
+        raise TypeError(f"不支持的权重类型: {type(weights)}")
+
+    if any(w < 0 for w in probabilities):
+        raise ValueError("权重必须为非负数")
+    if sum(probabilities) <= 0:
+        raise ValueError("权重总和必须大于 0")
+    return probabilities  # weights 相对权重,只需要是正数，相对大小决定了选择概率,会自动归一化
+
+
+def weierstrass(x, a=0.5, b=21, n_terms=100):
+    """
+    威尔斯特拉斯函数实现
+
+    参数:
+        x: 输入值或数组
+        a: 振幅衰减系数 (0 < a < 1)
+        b: 频率增长基数 (正奇数)
+        n_terms: 级数截断项数
+    """
+    # 验证参数条件（原始严格条件）
+    assert 0 < a < 1, "a必须在(0,1)之间"
+    assert b % 2 == 1, "b必须是奇数"
+    assert a * b > 1 + 3 * np.pi / 2, "不满足处处不可导条件"
+
+    x = np.atleast_1d(x)
+    result = np.zeros_like(x, dtype=float)
+
+    # 计算级数和
+    for n in range(n_terms):
+        result += a ** n * np.cos(b ** n * np.pi * x)
+
+    return result
+
+
+def geometric_brownian_motion(S0=100, mu=0.05, sigma=0.2, T=1.0, N=1000, seed=None):
+    """几何布朗运动（Black-Scholes模型基础）"""
+    if seed is not None:
+        np.random.seed(seed)
+
+    dt = T / N
+    t = np.linspace(0, T, N + 1)
+
+    # 通过标准布朗运动转换
+    dW = np.random.normal(0, np.sqrt(dt), N)  # 增量服从 N(0, dt)
+    W = np.cumsum(dW)  # 累积和
+    W = np.insert(W, 0, 0)  # W(0) = 0
+    # S(t) = S0 * exp((mu - 0.5*sigma^2)*t + sigma*W(t))
+    S = S0 * np.exp((mu - 0.5 * sigma ** 2) * t + sigma * W)
+
+    return t, S
+
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    import os
+
+    # os.environ["OMP_NUM_THREADS"] = "8"
+    # os.environ["MKL_NUM_THREADS"] = "8"
+    # Adjust these paths to match your actual Tcl/Tk directories
+    os.environ['TCL_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tcl8.6'
+    os.environ['TK_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tk8.6'
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+
+    x = np.linspace(-2, 2, 10000)
+    y = weierstrass(x, a=0.5, b=21, n_terms=50)
+    # 全局视图
+    axes[0].plot(x, y, 'b-', linewidth=0.8)
+    axes[0].set_title('Weierstrass Function (Global View)')
+    axes[0].set_xlabel('x')
+    axes[0].set_ylabel('W(x)')
+    axes[0].grid(True, alpha=0.3)
+
+    # 局部放大视图（展示自相似性）
+    x_zoom = np.linspace(0.5, 0.55, 5000)
+    y_zoom = weierstrass(x_zoom, a=0.5, b=21, n_terms=100)
+    axes[1].plot(x_zoom, y_zoom, 'r-', linewidth=0.8)
+    axes[1].set_title('Zoomed In (0.5 to 0.55)')
+    axes[1].set_xlabel('x')
+    axes[1].grid(True, alpha=0.3)
+
+    for i in range(5):
+        t, S = geometric_brownian_motion(S0=100, mu=0.1, sigma=0.3, T=1.0, seed=i)
+        axes[2].plot(t, S, alpha=0.7)
+    axes[2].set_title('Geometric Brownian Motion (Stock Price Simulation)')
+    axes[2].set_xlabel('t')
+    axes[2].set_ylabel('S(t)')
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()

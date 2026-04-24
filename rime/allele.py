@@ -2,6 +2,7 @@ import itertools
 import random
 import numpy as np
 from collections import defaultdict, Counter
+from rime.helpers import get_probability, normalize_weights
 
 
 class AlleleBase:
@@ -133,11 +134,6 @@ class AlleleBase:
         return np.kron(state1, state2)
 
     @staticmethod
-    def density_matrix(state) -> np.ndarray:
-        """从状态向量计算密度矩阵 纯态密度矩阵"""
-        return np.outer(state, np.conj(state))
-
-    @staticmethod
     def is_quantum_state(vector, tolerance=1e-10):
         """检查向量是否表示有效的量子态（是否归一化）"""
         norm = np.sum(np.abs(vector) ** 2)
@@ -242,63 +238,6 @@ class AlleleBase:
         for g, f in zip(genotype_pairs, freqs):
             genotype_freq[tuple(sorted(g))] += f
         return {k: round(v, 6) for k, v in genotype_freq.items()}
-
-    @staticmethod
-    def get_probability(data: list | tuple | dict, output_format: str = "probs", sort: bool = False) -> dict:
-        """
-        统计列表中的元素频率，并支持不同的输出格式。
-
-        :param data: 输入的列表,possibilities
-        :param output_format: 输出格式，可选值：
-            - "counter": 返回 Counter 统计的字典
-            - "probability": 返回归一化的概率字典,normalize
-        :param sort: 按值从大到小排序
-        :return: 对应格式的统计结果
-        """
-        ct = data.copy() if isinstance(data, dict) else Counter(data)
-        if output_format == "counter":
-            if sort:
-                ct = sorted(ct.items(), key=lambda x: x[1], reverse=True)
-            return dict(ct)
-
-        if output_format in ("probs", "probability"):
-            total = sum(ct.values())
-            if total == 0:
-                return {}
-            probs = {key: value / total for key, value in ct.items()}
-            if sort:
-                return dict(sorted(probs.items(), key=lambda x: x[1], reverse=True))
-            return probs
-
-        raise ValueError("Invalid output_format. Choose from  'counter' or 'probability'.")
-
-    @staticmethod
-    def normalize_weights(items: list | tuple, weights: dict | list | tuple | float | int) -> list:
-        """
-        将多种形式的权重输入统一为与 items 对齐的概率列表。
-
-        :param items: 要采样的元素序列
-        :param weights: 输入权重，可以是 dict / list / tuple / float / int / None
-        :return: 概率（未必归一化，但可直接用于 random.choices / np.random.choice）
-        """
-        n = len(items)
-        # weights 是数字 → 均匀随机
-        if isinstance(weights, (float, int)):
-            probabilities = [1.0 / n] * n
-        elif isinstance(weights, (list, tuple)):
-            if len(weights) != n:
-                raise ValueError(f"权重长度 {len(weights)} 与元素数 {n} 不匹配")
-            probabilities = list(weights)
-        elif isinstance(weights, dict):  # 处理缺失的权重
-            probabilities = [weights.get(x, 0.0) for x in items]
-        else:
-            raise TypeError(f"不支持的权重类型: {type(weights)}")
-
-        if any(w < 0 for w in probabilities):
-            raise ValueError("权重必须为非负数")
-        if sum(probabilities) <= 0:
-            raise ValueError("权重总和必须大于 0")
-        return probabilities  # weights 相对权重,只需要是正数，相对大小决定了选择概率,会自动归一化
 
 
 class AlleleSystem(AlleleBase):
@@ -969,6 +908,16 @@ class Allele(ABOSystem):
         """
         输血相容性逻辑：捐赠者的抗原如果出现在受血者的抗体中，则会被排斥。关键原则：受血者的抗体不能与供血者的抗原发生反应。
         {'A': ['A', 'AB'], 'AB': ['AB'], 'B': ['B', 'AB'], 'O': ['B', 'O', 'A', 'AB']}
+        {
+            'O-': ['O-', 'O+', 'A-', 'A+', 'B-', 'B+', 'AB-', 'AB+'],
+            'O+': ['O+', 'A+', 'B+', 'AB+'],
+            'A-': ['A-', 'A+', 'AB-', 'AB+'],
+            'A+': ['A+', 'AB+'],
+            'B-': ['B-', 'B+', 'AB-', 'AB+'],
+            'B+': ['B+', 'AB+'],
+            'AB-': ['AB-', 'AB+'],
+            'AB+': ['AB+'],
+        }
         """
         vector_to_antigen = cls.vector_to_antigen_mapping()
         vector_to_antibody = cls.vector_to_antibody_mapping()
@@ -1004,7 +953,7 @@ class Allele(ABOSystem):
             else:
                 ct = Counter(data)
             combined_counts = {a: ct.get(a, 0) + allele_freq.get(a, 0) * prior_size for a in alleles}
-            allele_freq = Allele.get_probability(combined_counts, output_format="probs")
+            allele_freq = get_probability(combined_counts, output_format="probs")
 
         if any(v < 0 for v in allele_freq.values()):
             raise ValueError("等位基因频率不能为负数")
@@ -1126,7 +1075,7 @@ class Allele(ABOSystem):
         (('A', 'A'), ('A', 'A')): {('A', 'A'): 1.0}}
         """
         return {cls.sorted_frozen(gt):
-                    cls.get_probability(data=cls.child_genotype_distribution(*gt), output_format="probs", sort=True)
+                    get_probability(data=cls.child_genotype_distribution(*gt), output_format="probs", sort=True)
                 for gt in itertools.combinations_with_replacement(cls.genotypes(), r=2)}
 
     @classmethod
@@ -1178,7 +1127,7 @@ class Allele(ABOSystem):
                 child_pheno = cls.genotype_to_phenotype(*cg)
                 pheno_comb_probs[key][child_pheno] += prob  # 累加
 
-        return {k: cls.get_probability(v, output_format="probs", sort=True) for k, v in pheno_comb_probs.items()}
+        return {k: get_probability(v, output_format="probs", sort=True) for k, v in pheno_comb_probs.items()}
 
     @system_expr('Phenotype_Probs_Equal_Mapping')
     def phenotype_probs_equal_mapping(cls):
@@ -1207,7 +1156,7 @@ class Allele(ABOSystem):
                     pheno = cls.genotype_to_phenotype(*cg)
                     pheno_comb_probs[key][pheno] += prob / len(combos)  # 等权平均
 
-        return {k: cls.get_probability(v, output_format='probs', sort=True) for k, v in pheno_comb_probs.items()}
+        return {k: get_probability(v, output_format='probs', sort=True) for k, v in pheno_comb_probs.items()}
 
     @classmethod
     def child_phenotype_distribution(cls, parent1_phenotype: str, parent2_phenotype: str, equal: bool = True,
@@ -1236,7 +1185,7 @@ class Allele(ABOSystem):
                     for cg, pc in cls.child_genotype_distribution(p1g, p2g).items():  # map genotype->prob
                         pheno_counter[cls.genotype_to_phenotype(*cg)] += w1 * w2 * pc
 
-        return cls.get_probability(pheno_counter, output_format="probs", sort=True)  # pheno_counter already sums to 1
+        return get_probability(pheno_counter, output_format="probs", sort=True)  # pheno_counter already sums to 1
 
     @classmethod
     def get_child_probability(cls, parent1_phenotype: str, parent2_phenotype: str, equal: bool = True) -> dict:
@@ -1296,7 +1245,7 @@ class Allele(ABOSystem):
             key = cls.sorted_frozen(p1_pheno, p2_pheno)  # 表现型组合去重
             pheno_comb_probs[key] += joint_prob  # 累加到对应表现型组合
 
-        return cls.get_probability(pheno_comb_probs, output_format='probs', sort=True)
+        return get_probability(pheno_comb_probs, output_format='probs', sort=True)
 
     @classmethod
     def get_parent_candidates_equal(cls, child_phenotype: str, weights: dict | float | int = None) -> dict:
@@ -1321,7 +1270,7 @@ class Allele(ABOSystem):
             joint_prob = prior * cond_prob  # 联合概率
             pheno_comb_probs[key] += joint_prob  # 累加到对应表现型组合
 
-        return cls.get_probability(pheno_comb_probs, output_format='probs', sort=True)
+        return get_probability(pheno_comb_probs, output_format='probs', sort=True)
 
     @classmethod
     def generate_allele(cls, weights: dict | list | tuple | float | int = None) -> str:
@@ -1336,7 +1285,7 @@ class Allele(ABOSystem):
         alleles = cls.alleles()
         if isinstance(weights, (float, int)):
             return random.choice(alleles)
-        probs = cls.normalize_weights(alleles, weights or cls.allele_freq())
+        probs = normalize_weights(alleles, weights or cls.allele_freq())
         return random.choices(list(alleles), weights=probs, k=1)[0]
 
     @classmethod
@@ -1353,7 +1302,7 @@ class Allele(ABOSystem):
             result = random.choices(cls.genotype_iter(unique=False), k=size)
             return result if size > 1 else result[0]
         genotypes = cls.genotypes()
-        probs = cls.normalize_weights(genotypes, weights or cls.genotype_freq())
+        probs = normalize_weights(genotypes, weights or cls.genotype_freq())
         result = random.choices(list(genotypes), weights=probs, k=size)
         return result if size > 1 else result[0]
 
@@ -1363,7 +1312,7 @@ class Allele(ABOSystem):
         随机生成血型 blood_types ('A', 'B', 'O', 'AB')
         """
         phenotypes = cls.phenotypes()
-        probs = cls.normalize_weights(phenotypes, weights or cls.phenotype_freq())  # 获取表现型概率分布
+        probs = normalize_weights(phenotypes, weights or cls.phenotype_freq())  # 获取表现型概率分布
         result = np.random.choice(phenotypes, size=size, p=np.array(probs))
         return result.tolist() if size > 1 else result.item()
 
@@ -1432,26 +1381,43 @@ class AlleleO(Allele):
 
 
 class BloodType:
-    """血型类，处理等位基因和表现型逻辑"""
+    """ABO血型类，处理等位基因和表现型逻辑
 
-    def __init__(self, alleles: tuple[Allele | str, Allele | str] = None, phenotype: str = None, cytoplasm: str = None):
+    抗原-抗体规则：
+    - A型: 抗原{'A'}，抗体{'B'}
+    - B型: 抗原{'B'}，抗体{'A'}
+    - O型: 抗原set()，抗体{'A', 'B'}
+    - AB型: 抗原{'A', 'B'}，抗体set()
+
+    输血相容性：
+    - O型可输给所有人（万能供血者）
+    - AB型可接受所有人（万能受血者）
+    """
+    System = Allele.system()
+
+    def __init__(self, alleles: tuple[Allele | str, Allele | str] = None, phenotype: str = None,
+                 rh_positive: bool = None):
         """
-        :param alleles: 核基因的等位基因对,等位基因组合，如 ('A', 'O'),如 ('Rf', 'rf')
-        :param cytoplasm: 细胞质类型，'S' 或 'N'
+        :param alleles: 等位基因对，如 ('A', 'O') 或 ('A', 'A')
+        :param phenotype: 表现型，如 'A', 'B', 'O', 'AB'
+        :param rh_positive: Rh因子，True为阳性(+)，False为阴性(-)
         """
         if alleles is not None:
-            self.reveal = True  # 当前对象的基因型是否可以被完全确定
+            self.reveal = True
         elif phenotype:
             alleles, w = Allele.get_random_genotype(phenotype)
             self.reveal = (w == 1)
         else:
-            alleles = Allele.generate_genotype(size=1)  # 标准化排序，如 ('A', 'O') → ('A', 'O')
+            alleles = Allele.generate_genotype(size=1)
             self.reveal = False
 
         self.alleles = tuple(a if isinstance(a, Allele) else Allele(a) for a in alleles)
-        self._phenotype = phenotype  # 保留原始表型
-        self.system = Allele.system()  # 血型系统，默认ABO
-        self.cytoplasm = cytoplasm
+        self._phenotype = phenotype
+        # Rh因子：阳性为显性，约85%人群为Rh+
+        if rh_positive is not None:
+            self.rh_positive = rh_positive
+        else:
+            self.rh_positive = random.random() < 0.85 if not self.reveal else None
 
     @property
     def genotype(self) -> tuple | None:
@@ -1462,176 +1428,93 @@ class BloodType:
         return Allele.genotype_to_phenotype(*self.genotype) if self.reveal else getattr(self, "_phenotype", None)
 
     @property
+    def abo_type(self) -> str:
+        """返回ABO血型，如 'A', 'B', 'AB', 'O'"""
+        return self.phenotype
+
+    @property
+    def full_type(self) -> str:
+        """返回完整血型（含Rh因子），如 'A+', 'AB-'"""
+        if self.rh_positive is None:
+            return self.phenotype
+        rh = '+' if self.rh_positive else '-'
+        return f"{self.phenotype}{rh}"
+
+    @property
     def antigens(self) -> set[str]:
         if self.reveal:
-            return self.alleles[0].get_antigens() | self.alleles[1].get_antigens()
-        return Allele.phenotype_to_antigens(self.phenotype)
+            ag = self.alleles[0].get_antigens() | self.alleles[1].get_antigens()
+        else:
+            ag = Allele.phenotype_to_antigens(self.phenotype)
+        if self.rh_positive:
+            ag = ag | {'D'}  # Rh阳性有D抗原
+        return ag
 
     @property
     def antibodies(self) -> set[str]:
-        return Allele.antigens_to_antibodies(self.antigens)
+        ab = Allele.antigens_to_antibodies(self.antigens - {'D'})
+        if self.rh_positive is False:
+            ab = ab | {'D'}  # Rh阴性有抗D抗体
+        return ab
 
     def get_gamete(self) -> str:
+        """随机返回一个等位基因（配子）"""
         if self.reveal:
             return random.choice([self.alleles[0].name, self.alleles[1].name])
         genotype, _ = Allele.get_random_genotype(self.phenotype)
         return random.choice(genotype)
 
-    def is_male_sterile(self):
-        """
-        判断是否为雄性不育：细胞质为 S 且核基因为 rf/rf
-        """
-        return self.cytoplasm == 'S' and self.alleles == ('rf', 'rf')
-
     @staticmethod
-    def child_alleles(blood_type1: 'BloodType', blood_type2: 'BloodType') -> tuple[str, ...]:
-        # 从父母处各随机获取一个等位基因
-        gamete_self = blood_type1.get_gamete()  # 母本贡献
-        gamete_partner = blood_type2.get_gamete()  # 父本贡献
-        return Allele.sorted_frozen(gamete_self, gamete_partner)
+    def child_genotype(parent1: 'BloodType', parent2: 'BloodType') -> tuple[str, str]:
+        """计算子代基因型"""
+        gamete1 = parent1.get_gamete()
+        gamete2 = parent2.get_gamete()
+        return Allele.sorted_frozen(gamete1, gamete2)
 
-    def cross(self, other: 'BloodType'):
-        """
-        与另一植株杂交，生成子代
-        :return: 子代基因型 (RicePlant 对象)
-        """
-        # 子代核基因：从父母各随机取一个等位
+    def child_distribution(self, other: 'BloodType', n_samples: int = 1000) -> dict:
+        """计算子代血型分布（蒙特卡洛采样）"""
+        samples = [BloodType.child_genotype(self, other) for _ in range(n_samples)]
+        phenotypes = [Allele.genotype_to_phenotype(*g) for g in samples]
+        counts = Counter(phenotypes)
+        return {p: c / n_samples for p, c in counts.items()}
+
+    def cross(self, other: 'BloodType') -> 'BloodType':
+        """与另一血型杂交，生成子代血型"""
         child_alleles = (
-            random.choice(self.alleles),  # 母本贡献
-            random.choice(other.alleles)  # 父本贡献
+            random.choice(self.alleles),
+            random.choice(other.alleles)
         )
-        # 排序等位基因以便统一表示（如 ('Rf', 'rf') 和 ('rf', 'Rf') 视为相同）
         child_alleles = tuple(sorted(child_alleles, key=lambda a: a.name))
-        # 子代细胞质来自母本（假设当前植株为母本）
-        return BloodType(child_alleles, cytoplasm=self.cytoplasm)
+        # Rh阳性为显性
+        rh_positive = self.rh_positive or other.rh_positive
+        return BloodType(child_alleles, rh_positive=rh_positive)
+
+    def can_donate_to(self, recipient: 'BloodType') -> bool:
+        """输血相容性：检查是否能输给受血者"""
+        return self.antigens.isdisjoint(recipient.antibodies)
+
+    def can_receive_from(self, donor: 'BloodType') -> bool:
+        """输血相容性：检查是否能从供血者接受"""
+        return donor.can_donate_to(self)
 
     def __repr__(self):
-        return f"BloodType(alleles={self.alleles}, phenotype='{self.phenotype}')"
+        return f"BloodType('{self.full_type}')"
+
+    def __eq__(self, other):
+        if not isinstance(other, BloodType):
+            return False
+        return (self.genotype == other.genotype and
+                self._phenotype == other._phenotype)
+
+    def __hash__(self):
+        return hash((self.genotype, self._phenotype))
 
     def is_valid_child(self, parent1: 'BloodType', parent2: 'BloodType') -> bool:
-        if not self.genotype or not parent1.genotype or not parent2.genotype:
-            return True  # 如果基因型未知，无法验证
+        """验证是否为有效子代"""
+        if not self.reveal or not parent1.reveal or not parent2.reveal:
+            return True
         return Allele.is_valid_child_by_alleles(self.genotype, parent1.genotype, parent2.genotype)
-
-    @staticmethod
-    def is_compatible(donor: 'BloodType', recipient: 'BloodType') -> bool:
-        """
-        输血相容性检查：检查捐赠者血型 donor 与受血者血型 recipient 是否兼容
-        donor 的抗原不能出现在 recipient 的抗体中 如果 donor 的抗原出现在 recipient 的抗体中，则不兼容
-        因此：如果 donor.antigens 与 recipient.antibodies 有交集，则不兼容。
-        # not any(antigen in recipient_antibodies for antigen in donor_antigens) donor in transfusion_rules[recipient]
-        # (donor_bin & antibody_bin) == 0
-        """
-        return donor.antigens.isdisjoint(recipient.antibodies)
 
 
 if __name__ == "__main__":
-    print(Allele.__doc__)
-    print(Allele.system(), Allele.alleles())
-    print('axes', Allele.get_axes_by_allele_vector(Allele.allele_vector_mapping()))
-    genotype_map = Allele.genotype_to_phenotype_mapping()
-    print('genotype_to_phenotype', genotype_map)
-    genotype_db = Allele.phenotype_to_genotypes_mapping()
-    print('phenotype_to_genotypes', genotype_db)
-    print('A', Allele.phenotype_to_genotypes('A'),
-          Allele.allele_vector('O'),
-          'AB:', Allele.genotype_to_phenotype('A', 'B'), Allele.genotype_to_phenotype('B', 'A'))
-    print(Allele.vector_to_state((0, 0)))
-    t1 = Allele.tensor_product(Allele.allele_state('A'), Allele.allele_state('B'))
-    print("Combined AB:", Allele.combine_quantum(Allele.allele_vector('A'), Allele.allele_vector('B')), t1,
-          Allele.separate_product_state(t1), Allele.is_entangled(t1), Allele.genotype_state('A', 'B'))
-    t1 = Allele.tensor_product(Allele.allele_state('A'), Allele.allele_state('A'))
-    print("Combined AA:", Allele.combine_quantum(Allele.allele_vector('A'), Allele.allele_vector('A')), t1,
-          Allele.separate_product_state(t1), Allele.is_entangled(t1), Allele.genotype_state('A', 'A'))
-    t1 = Allele.tensor_product(Allele.allele_state('A'), Allele.allele_state('O'))
-    print("Combined AO:", Allele.combine_quantum(Allele.allele_vector('A'), Allele.allele_vector('O')), t1,
-          Allele.separate_product_state(t1), Allele.is_entangled(t1), Allele.original_states(t1),
-          Allele.genotype_state('A', 'O'))
-    t1 = Allele.tensor_product(Allele.allele_state('O'), Allele.allele_state('O'))
-    print("Combined OO:", Allele.combine_quantum(Allele.allele_vector('O'), Allele.allele_vector('O')), t1,
-          Allele.separate_product_state(t1), Allele.is_entangled(t1), Allele.original_states(t1),
-          Allele.genotype_state('O', 'O'))
-    print(Allele.state_to_phenotype(Allele.genotype_state('A', 'B')))
-    print(Allele.state_to_phenotype(Allele.genotype_state('A', 'O')))
-    print(Allele.state_to_phenotype(Allele.genotype_state('O', 'O')))
-
-    print('phenotype', Allele.generate_phenotype(), 'genotypes', Allele.genotype_iter(False))
-    print('frq', Allele.genotype_freq())
-    print(Allele.phenotype_freq())
-    print('ab antigens', Allele.vector_to_antigens((1, 1)), 'antibodies',
-          Allele.antigens_to_antibodies({'A'}), Allele.antigens_to_antibodies({'O'}),
-          Allele.antigens_to_antibodies({'A', 'B'}))
-
-    a1 = Allele.generate_genotype()
-    a2 = Allele.generate_genotype()
-    p1 = Allele.allele_to_phenotype(*a1)
-    p2 = Allele.allele_to_phenotype(*a2)
-    print(a1, a2, 'then', Allele.child_genotype_distribution(a1, a2))
-    print(p1, 'and', p2, 'then', Allele.child_phenotype_distribution(p1, p2, True))
-    print(p1, 'and', p2, 'then', Allele.child_phenotype_distribution(p1, p2, False, False))
-    print(p1, 'and', p2, 'then', Allele.child_phenotype_distribution(p1, p2, False, True))
-    print(p1, 'and', p2, 'then', Allele.get_child_probability(p1, p2))
-
-    print(p1, 'c and p1', p2, 'then parent2', Allele.get_parent_phenotypes(p1, p2))
-    print('parent_possible')
-    print('A', Allele.get_parent_phenotypes('A'))
-    print('O', Allele.get_parent_phenotypes('O'))
-    print('AB', Allele.get_parent_phenotypes('AB'))
-
-    child_probability = {','.join(sorted(p)): Allele.get_child_probability(*p)
-                         for p in itertools.product(Allele.phenotypes(), repeat=2)}
-    print(child_probability)
-    print('genotype_probs', Allele.genotype_probs_mapping())
-    print('phenotype_probs', Allele.phenotype_probs_mapping())
-    print('phenotype_probs_equal', Allele.phenotype_probs_equal_mapping())
-
-    print('union', AlleleB.union_antigens(AlleleA(), AlleleO()))
-    print('compatible O->A', Allele.is_compatible_phenotype('O', 'A'))
-    print('genotype_transfusion', Allele.genotype_transfusion_mapping())
-    print('allele_state', Allele.allele_state_mapping())
-
-    print('AlleleB', AlleleB.allele_binary('B'), Allele.allele_binary_mapping(),
-          AlleleB.allele_binary('A'))
-
-    print('parent_candidates', AlleleB.get_parent_candidates(child_phenotype='A', weights=None))
-    print('parent_candidates_equal', AlleleB.get_parent_candidates_equal(child_phenotype='A', weights=None))
-    print('phenotype_conditional', AlleleB.phenotype_conditional_mapping())
-
-    Allele.set_allele_freq(freq={'A': 0.2, 'B': 0.1, 'O': 0.7})
-
-    print(Allele.phenotype_freq(), Allele.genotype_freq(), Allele.allele_freq())
-    print('AO:', Allele.genotype_to_phenotype(genotype='AO'))
-
-    print('vector_to_antigen', Allele.vector_to_antigen_mapping())
-    print(Allele.vector_to_antibody_mapping())
-
-    print('genotype_to_vector_mapping', Allele.genotype_to_vector_mapping())
-    print('phenotype_to_genotypes_mapping', Allele.phenotype_to_genotypes_mapping())
-    print('phenotype_transfusion', Allele.phenotype_transfusion_mapping())
-    print(Allele.phenotype_to_antigens('A'))
-    print(Allele.phenotype_to_genotypes('A'))
-
-    print(Allele.generate_phenotype(size=30))
-    print('generate_phenotype', Allele())
-    print(list(Allele.genotype_combinations()))
-
-    print(Allele._expressed_cache)
-    print('vars', Allele.get_vars())
-    print('cache', Allele.get_cache())
-    print(Allele.re_cache('ALLELES', rebuild=True))
-
-    print(dir(AlleleB), '\n', AlleleO.__dict__)
-    Allele.rebuild_constants()
-    print(Allele.get_vars())
-
-    print('repr', Allele.__repr__)
-
-    Allele.rebuild_constants(axes=['X', 'Y', 'Z'], outer='')
-    print(Allele.system(), Allele.alleles())
-    print('axes', Allele.get_axes_by_allele_vector(Allele.allele_vector_mapping()))
-    genotype_map = Allele.genotype_to_phenotype_mapping()
-    print('genotype_to_phenotype', genotype_map)
-    genotype_db = Allele.phenotype_to_genotypes_mapping()
-    print('phenotype_to_genotypes', genotype_db)
-
-    genotypes_iter = Allele.genotype_iter_by_freq(1000, 360)
+    pass

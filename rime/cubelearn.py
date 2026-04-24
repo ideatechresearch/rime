@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 import numpy as np
+import os
 from rime.cube import CubeBase, StickerCube
+from rime.base import DATA_DIR
 from rime.cubie import CubieState, CubieMove, StickerMove, ActionToken, CubieBase, Phase15Coord
 from rime.cubeplot import visualize_angular_lowrank, draw_training_curves
 import torch
@@ -873,7 +875,7 @@ if __name__ == "__main__":
     visualize_angular_lowrank(
         pred_np, true_np, mask_np,
         rank=rank,
-        save_prefix="data/angular_lowrank"
+        save_prefix=os.path.join(DATA_DIR, "angular_lowrank")
     )
     '''
     Angular rank 5 | Final observed rel err = 0.0000
@@ -894,7 +896,7 @@ if __name__ == "__main__":
 
     gpd = True
     as_key = True
-    path = 'data/phase15_dataset_by_key.pkl' if as_key else 'data/phase15_dataset.pkl'
+    path = os.path.join(DATA_DIR, "phase15_dataset_by_key.pkl") if as_key else os.path.join(DATA_DIR, "phase15_dataset.pkl")
     if gpd:
         # dataset = cube.generate_phase15_dataset(max_depth=10, num_starting_points=50, num_samples=50000, as_key=as_key)
         dataset = cube.generate_phase15_dataset(max_depth=16, num_starting_points=100, num_samples=20000, as_key=as_key,

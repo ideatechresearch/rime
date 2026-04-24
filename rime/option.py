@@ -174,15 +174,6 @@ def compute_trend(price_series, sigma, short=20, long=100):
     return abs(ema_short - ema_long) / sigma
 
 
-def simulate_price(S0, mu, sigma, dt, n_steps):
-    S = [S0]
-    for _ in range(n_steps):
-        dW = np.random.randn() * np.sqrt(dt)
-        dS = mu * dt + sigma * dW
-        S.append(S[-1] + dS)
-    return np.array(S)
-
-
 def control_u(z, trend, u_max, k=1.5, c=1.0):
     """控制函数 u(x)"""
     position_term = np.tanh(-z / k)  # 位置项（决定 A / B）
@@ -194,6 +185,30 @@ def target_position(u, price, S0):
     """目标持仓"""
     return -u * (price - S0)
 
+def simulate_price(S0, mu, sigma, dt, n_steps):
+    S = [S0]
+    for _ in range(n_steps):
+        dW = np.random.randn() * np.sqrt(dt)
+        dS = mu * dt + sigma * dW
+        S.append(S[-1] + dS)
+    return np.array(S)
+
+def monte_carlo_option_price(S0=100, K=100, T=1.0, r=0.05, sigma=0.2, n_paths=10000):
+    """用几何布朗运动模拟估算欧式看涨期权价格"""
+    dt = T / 365
+    n_steps = int(T / dt)
+
+    # 生成所有路径
+    dW = np.random.normal(0, np.sqrt(dt), (n_paths, n_steps))
+    W = np.cumsum(dW, axis=1)
+
+    # 终点价格
+    ST = S0 * np.exp((r - 0.5 * sigma ** 2) * T + sigma * W[:, -1])
+    # 折现收益
+    payoffs = np.maximum(ST - K, 0)
+    price = np.exp(-r * T) * np.mean(payoffs)
+
+    return price
 
 if __name__ == "__main__":
     # 1. 实例化参数

@@ -1,4 +1,6 @@
 from rime.cubie import CubieState, CubieMove, CubieBase
+from rime.base import DATA_DIR
+import os
 import numpy as np
 import random, math
 import matplotlib.pyplot as plt
@@ -843,7 +845,7 @@ def analyze_block_spectrum(A_block, blocks):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.ylim(0, 1.05)
-    plt.savefig("data/Spectral Distribution by Block.png", dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(DATA_DIR, "Spectral Distribution by Block.png"), dpi=300, bbox_inches='tight')
     plt.show()
 
     eigvals_64 = next(ev for name, ev in block_eigvals.items() if 'size 64' in name)
@@ -851,7 +853,46 @@ def analyze_block_spectrum(A_block, blocks):
     slow_energy_64 = np.sum(eigvals_64[eigvals_64 >= 2 / 3] ** 2)
     slow_energy_144 = np.sum(eigvals_144[eigvals_144 >= 2 / 3] ** 2)
     print(f"Slow energy from 64 block: {slow_energy_64 / (slow_energy_64 + slow_energy_144):.2%}")
+    """
+        蓝色曲线（Block 0, size 64，角块）
+        谱从 1.0 缓慢下降，到第 20–40 个特征值仍在 0.6–0.8 区间。
+        明显覆盖了 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
+        下降速度慢，说明角块子空间贡献了大部分慢模式（集体缩放、准守恒行为）。
 
+        橙色曲线（Block 1, size 144，棱块）
+        谱从 1.0 快速下降，到第 40 个左右已跌破 0.6，第 80 个左右跌到 0.4 以下。
+        明显覆盖了 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
+        下降速度快，说明棱块子空间贡献了大部分快模式（快速随机化、混沌扩散）。
+
+        守恒层（λ=1）由所有小块 + 部分角块共同支撑。
+
+        64 dim 角块（Block 0）
+        谱从 1.0 缓慢下降，覆盖 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
+        主导慢层（7/9 + 2/3），是慢动力学的核心贡献者。
+
+        144 dim 棱块（Block 1）
+        谱快速下降，覆盖 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
+        主导快层（5/9 + 1/3），负责快速随机化和混沌混合。
+
+        21 个 size=1 小块（Block 2–21）
+        全部是单一特征值（一条线），没有退化。
+        分类总结：
+        λ=1.0（守恒）：Block 10, 12, 18, 20（至少 4 个）
+        λ=7/9（慢）：Block 11, 13–17, 19, 21（至少 8 个）
+        λ=2/3（次慢）：Block 2–9（至少 8 个）
+
+        这些小块是独立的 1 维不变子空间（trivial 或简单 scaling 表示），支撑了守恒层和部分慢层。
+
+        整体结构总结
+        慢层（λ ≥ 2/3 ≈100 维） = 角块（64） + 小块中的 7/9 和 2/3（约 16 个 1 维）
+        快层（λ ≤ 5/9 ≈128 维） = 棱块（144）主导
+        守恒层（λ=1, 24 维） = 小块中的 λ=1 + 角块/棱块的部分 trivial 表示
+        没有“纯随机”块，所有块都有明确谱贡献 → 整个 228 维表示是结构化的块对角分解，而非均匀混合。
+
+        棱块有 12 个位置（置换群 S12），维度 144 = 12! / (12-12)! 的部分 + 朝向 2^11，变化空间大，容易产生“慢衰减”的集体模式（e.g. 整体置换趋势、长程相关）。
+        角块只有 8 个位置（S8），维度 64 = 8! / (8-8)! + 朝向 3^7，变化更局部，更多贡献“中速”或“准守恒”模式（7/9, 2/3）。
+        Slow energy from 64 block: 15.22%
+        """
     return block_eigvals
 
 
@@ -903,7 +944,7 @@ def compute_block_distance_expectation(corner_idx, edge_idx, num_samples_per_dep
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("data/Corner vs Edge Block_Expected Spectral Distance vs Depth.png", dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(DATA_DIR, "Corner vs Edge Block_Expected Spectral Distance vs Depth.png"), dpi=300, bbox_inches='tight')
     plt.show()
 
     return depths, mean_corner, mean_edge
@@ -973,7 +1014,7 @@ def compute_inter_state_block_distance(corner_idx, edge_idx, num_pairs_per_depth
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("data/Inter-State Spectral Distance in Corner vs Edge Blocks.png", dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(DATA_DIR, "Inter-State Spectral Distance in Corner vs Edge Blocks.png"), dpi=300, bbox_inches='tight')
     plt.show()
 
     return depths, mean_corner, mean_edge, std_corner, std_edge
@@ -1116,1344 +1157,153 @@ def simulate_block_dominated_evolution(model, corner_idx, edge_idx, T=100, num_t
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("data/simulate_block_dominated.png", dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(DATA_DIR, "simulate_block_dominated.png"), dpi=300, bbox_inches='tight')
     plt.show()
 
 
-
-if __name__ == '__main__':
-
-    import os
-
-    # Adjust these paths to match your actual Tcl/Tk directories
-    os.environ['TCL_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tcl8.6'
-    os.environ['TK_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tk8.6'
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
-
-    all_moves = CubieMove.prim_moves().copy()
-    all_moves.update(CubieMove.slice_moves())
-
-    samples = list(all_moves.values())  # 27 21
-    prim_list18 = list(CubieMove.prim_moves.values())
-    A = CubieBase.generate_cubie_rho(27)
-    print(A.shape)
-    B = CubieBase.generate_cubie_rho(27)
-    eigvals, U = np.linalg.eig(A)
-    blocks = []
-    for mv in samples:
-        M = U.T.conj() @ mv.rho() @ U
-        blocks.append(M)
-    print(len(blocks))
-
-    blocks = detect_blocks(samples, U)
-    sizes = [len(b) for b in blocks]
-    print("Block sizes:", sorted(sizes))  # ..., 64, 144
-    print("Number of blocks:", len(blocks))
-
-    moves = list(CubieMove.prim_moves.values())
-    M0 = CubieMove.identity()
-    for mv in moves:
-        M0 = M0.compose(mv)
-
-    products = set()
-    for g1 in prim_list18:
-        for g2 in prim_list18:
-            prod = g1.compose(g2)
-            if prod != CubieMove.identity():  # 排除单位元
-                products.add(prod)
-
-    print(f"两两组合后去重 + 去 identity 数量: {len(products)}")  # 269
-
-    prim_list12 = [v for k, v in CubieMove.prim_moves.items() if k[2] != 2]
-    print(len(prim_list12))
-    ME = CubieMove.identity()
-    prim_list13 = prim_list12 + [ME]
-    products = set()
-    for g1 in prim_list13:
-        for g2 in prim_list13:
-            prod = g1.compose(g2)
-            if prod != ME:  # 排除单位元
-                products.add(prod)
-    print(f"两两组合后去重 + 去 identity 数量: {len(products)}")  # 134
-
-    products2 = products.copy()
-    for g in products:
-        g2 = g.inverse()
-        if g2 not in products2:
-            products2.add(g2)
-    print(f"两两组合后去重 + 去 identity + inverse 数量: {len(products2)}")  # 268
-
-    products2 = CubieBase.generate_compose_moves(CubieMove.prim_moves(), commutator=True)
-    print(f"18 两两组合后去重 + 去 identity + commutator 数量: {len(products2)}")  # 224
-
-    # moves = list(products)
-    # moves = list(products2.values())
-    """
-    群谱学习
-    1.0 20
-    0.880597 4
-    0.701493 36
-    0.492537 8
-    0.462687 60
-    0.253731 36
-    0.238806 32
-    0.134328 24
-    0.014925 8
-    exp(-λt)
-    """
-    rho_moves = [m.rho() for m in moves]
-    A_micro = sum(rho_moves) / len(rho_moves)  # 生成元平均算子 微时间算子
-
-    B_COM = M0.rho()
-    A_real = np.block([
-        [A_micro.real, -A_micro.imag],
-        [A_micro.imag, A_micro.real]
-    ])  # (456, 456) 实矩阵表示复线性变换
-
-    eigvals_am, U_am = np.linalg.eig(A_micro)
-    idx = np.argsort(-np.abs(eigvals_am.real))
-    U_am = U_am[:, idx]
-    eigvals_am = eigvals_am[idx]
-    print('A_micro:', eigvals_am[:10])
-    print('A_micro:', np.sort(np.abs(eigvals_am))[::-1][:40])
-    """
-    群表示谱分析
-    有限群表示在随机生成元上的谱分层
-    A_micro: [1.        1.        1.        1.        1.        1.        1.
-     1.        1.        1.        1.        1.        1.        1.
-     1.        1.        1.        1.        1.        1.        1.
-     1.        1.        1.        0.7777778 0.7777778 0.7777778 0.7777778
-     0.7777778 0.7777778 0.7777778 0.7777778 0.7777778 0.7777778 0.7777778
-     0.7777778 0.7777778 0.7777778 0.7777778 0.7777778]
-     24 个 λ = 1
-     第二层：大量 λ= 7/9
-     v=vslow+vmid+vfast
-    精确三层动力学
-    守恒层 (λ=1) → 24 全局守恒量,群在 cubie 微观空间上的轨道平均空间
-    亚慢层 (λ=7/9) → 44 准对称模式
-    中层 (λ=2/3) → 8 取向型
-    快层 (<0.6) 混合自由度
-    (A−1)(A−7/9)(A−2/3)(A−5/9)(A−1/3)Q(A)=0
-    """
-    generators = rho_moves  # [m.rho() for m in samples]  # 的 27 个 ρ(s)
-    # for m in generators:
-    #     print(np.linalg.norm(A_micro @ m - m @ A_micro))
-    #     # A_micro 不与生成元对易,表示分解上是“非均匀对称”的
-    #
-    # for i in range(len(generators)):
-    #     for j in range(len(generators)):
-    #         print(np.linalg.norm(generators[i] @ generators[j] - generators[j] @ generators[i]))
-
-    dim_R = 228
-    diag_r = np.array([1.0] * 24 + [0.9] * 44 + [0.8] * 8 + [0.7] * (dim_R - 24 - 44 - 8))
-    R = np.diag(diag_r)
-    norm_comm = np.linalg.norm(A_micro @ R - R @ A_micro)  # 整体空间旋转算子” R
-    print("Commutator norm:", norm_comm)
-
-    orbits = compute_orbits(rho_moves, dim_R)
-
-    print("轨道数 =", len(orbits))  # 40
-
-    invariants = [orbit_vector(o, dim_R) for o in orbits]
-
-    w, V = np.linalg.eig(A_micro)
-
-    print("sw:", np.sum(np.isclose(w, 1.0)))
-    eigvals, U = np.linalg.eig(A_micro)
-
-    blocks = detect_blocks(list(CubieMove.prim_moves().values()), U)
-    sizes = [len(b) for b in blocks]
-    print("Block sizes:", sorted(sizes))  # ..., 64, 144
-    print("Number of blocks:", len(blocks))
-    # blocks[0]=64角块, blocks[1]=144棱块（根据之前 detect_blocks 顺序）
-    corner_idx = blocks[0]  # size 64 [0,...63]
-    edge_idx = blocks[1]  # size 144 [64,....207]
-
-    T = np.zeros((228, 228), dtype=np.complex64)
-
-    for mv in CubieMove.prim_moves.values():
-        T += mv.matrix
-
-    T /= len(CubieMove.prim_moves())
-
-    wT, vT = np.linalg.eig(T)
-
-    idx = np.argsort(-np.abs(wT))
-    wT = wT[idx]
-    vT = vT[:, idx]
-    # print(wT, vT)
-    edge_energy = np.linalg.norm(T[edge_idx][:, edge_idx])
-    corner_energy = np.linalg.norm(T[corner_idx][:, corner_idx])
-    for i in range(15):
-        vec = vT[:, i]
-
-        corner_part = np.linalg.norm(vec[corner_idx])
-        edge_part = np.linalg.norm(vec[edge_idx])
-
-        print(i, w[i], corner_part, edge_part)
-
-    """
-    Block sizes: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 64, 144]
-    Number of blocks: 22
-    20 个 1D block:11 + 7 + 1 + 1 = 20 合法状态守恒量
-    208:真正参与 random walk dynamics 的空间 
-    144:fast mixing bulk
-    """
-    A_block = V.T.conj() @ A_micro @ V
-    block_spectra = analyze_block_spectrum(A_block, blocks)
-    """
-    蓝色曲线（Block 0, size 64，角块）
-    谱从 1.0 缓慢下降，到第 20–40 个特征值仍在 0.6–0.8 区间。
-    明显覆盖了 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
-    下降速度慢，说明角块子空间贡献了大部分慢模式（集体缩放、准守恒行为）。
-    
-    橙色曲线（Block 1, size 144，棱块）
-    谱从 1.0 快速下降，到第 40 个左右已跌破 0.6，第 80 个左右跌到 0.4 以下。
-    明显覆盖了 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
-    下降速度快，说明棱块子空间贡献了大部分快模式（快速随机化、混沌扩散）。
-    
-    守恒层（λ=1）由所有小块 + 部分角块共同支撑。
-    
-    64 dim 角块（Block 0）
-    谱从 1.0 缓慢下降，覆盖 7/9 ≈0.778 和 2/3 ≈0.667 的范围。
-    主导慢层（7/9 + 2/3），是慢动力学的核心贡献者。
-    
-    144 dim 棱块（Block 1）
-    谱快速下降，覆盖 5/9 ≈0.556 和 1/3 ≈0.333 的范围。
-    主导快层（5/9 + 1/3），负责快速随机化和混沌混合。
-    
-    21 个 size=1 小块（Block 2–21）
-    全部是单一特征值（一条线），没有退化。
-    分类总结：
-    λ=1.0（守恒）：Block 10, 12, 18, 20（至少 4 个）
-    λ=7/9（慢）：Block 11, 13–17, 19, 21（至少 8 个）
-    λ=2/3（次慢）：Block 2–9（至少 8 个）
-    
-    这些小块是独立的 1 维不变子空间（trivial 或简单 scaling 表示），支撑了守恒层和部分慢层。
-    
-    整体结构总结
-    慢层（λ ≥ 2/3 ≈100 维） = 角块（64） + 小块中的 7/9 和 2/3（约 16 个 1 维）
-    快层（λ ≤ 5/9 ≈128 维） = 棱块（144）主导
-    守恒层（λ=1, 24 维） = 小块中的 λ=1 + 角块/棱块的部分 trivial 表示
-    没有“纯随机”块，所有块都有明确谱贡献 → 整个 228 维表示是结构化的块对角分解，而非均匀混合。
-    
-    棱块有 12 个位置（置换群 S12），维度 144 = 12! / (12-12)! 的部分 + 朝向 2^11，变化空间大，容易产生“慢衰减”的集体模式（e.g. 整体置换趋势、长程相关）。
-    角块只有 8 个位置（S8），维度 64 = 8! / (8-8)! + 朝向 3^7，变化更局部，更多贡献“中速”或“准守恒”模式（7/9, 2/3）。
-    Slow energy from 64 block: 15.22%
-    
-    The 228-dimensional transfer operator A decomposes into block-diagonal form under the cubie basis, with principal blocks of size 64 (corners) and 144 (edges), plus 19 trivial 1-dimensional blocks. The eigenvalue spectrum of each block reveals clear separation: the 64-dimensional corner block dominates the slow layers (λ ≈ 7/9 and 2/3), exhibiting slower decay and contributing to quasi-invariant dynamics. In contrast, the 144-dimensional edge block dominates the fast layers (λ ≈ 5/9 and 1/3), with rapid spectral fall-off consistent with chaotic mixing. The trivial blocks concentrate near λ = 1, supporting the exact invariant subspace (dim 24). This block-level spectral stratification confirms that slow dynamics are primarily driven by corner orientations and permutations, while fast randomization arises from edge permutations, providing a structural explanation for the observed 5-layer rational spectrum and slow-fast separation.
-    The 228-dimensional transfer operator decomposes into a block-diagonal form under the cubie basis, with principal blocks of size 64 (corners), 144 (edges), and 21 trivial 1-dimensional blocks. Spectral analysis of each block reveals clear separation of contributions:
-    The 64-dimensional corner block dominates the slow layers (λ ≈ 7/9 and 2/3), exhibiting gradual spectral decay and contributing to quasi-invariant dynamics.
-    The 144-dimensional edge block dominates the fast layers (λ ≈ 5/9 and 1/3), with rapid fall-off consistent with chaotic mixing.
-    The 21 1-dimensional blocks concentrate at discrete values: λ = 1.0 (invariant/trivial), λ = 7/9 (slow scaling), and λ = 2/3 (intermediate diffusion), each contributing exactly one eigenvalue per block.
-    This block-level stratification confirms that slow dynamics are primarily driven by corner orientations and permutations, fast randomization by edge permutations, and conserved quantities by trivial 1D representations. The clean separation explains the observed 5-layer rational spectrum and the slow manifold's robustness under group action.
-    Block-level energy decomposition of the slow manifold (λ ≥ 2/3, 100 dimensions) reveals that the 144-dimensional edge block contributes approximately 84.78% of the slow-layer energy, while the 64-dimensional corner block accounts for 15.22%. The 21 trivial 1-dimensional blocks contribute negligibly (<1%). This distribution indicates that collective edge permutations and orientations dominate the slow dynamics, providing long-range correlations and quasi-invariant modes, whereas corner configurations contribute more localized slow scaling. Fast-layer energy (λ < 2/3, 128 dimensions) is overwhelmingly from the edge block, confirming its role in rapid randomization. The spectral separation by cubie type underscores a structural origin for the observed 5-layer rational spectrum: slow layers emerge from edge-driven collective behavior, while corner blocks support intermediate quasi-conserved modes.   
-    """
-    depths, mean_corner, mean_edge = compute_block_distance_expectation(corner_idx, edge_idx, num_samples_per_depth=300)
-    """
-    角块（64 dim） ≈ 扩散几何（diffusion geometry，距离随 √k 增长）
-    棱块（144 dim） ≈ 混沌体（chaotic bulk，距离快速饱和）
-    角块：早期 √k + 中后期饱和 → 有限扩散几何（diffusion in bounded space）
-棱块：极快饱和 → 混沌体（strong mixing, ergodic-like）
-两条曲线在 depth ≈5 后完全分离，棱块饱和值（≈4.5）明显高于角块（≈3.3），说明棱块的“混沌容量”更大，状态空间更“宽广”。
-    Expected spectral distance in block subspaces as a function of scramble depth k reveals stark geometric differences. The 64-dimensional corner block exhibits diffusion-like scaling, with distance growing approximately as √k in the early regime (k ≤ 10) before saturating around 3.3–3.5 at higher depths. In contrast, the 144-dimensional edge block displays rapid saturation, reaching ≈4.4–4.5 by depth ≈5 and remaining flat thereafter. This confirms the prediction: corners behave as a diffusion geometry (slow, √k-like spreading in bounded space), while edges constitute a chaotic bulk (fast mixing to equilibrium). The higher saturation level of the edge block (≈4.5 vs ≈3.3) further indicates greater mixing capacity and ergodicity in edge permutations. These scaling laws provide a geometric origin for the spectral stratification: slow layers arise from diffusion-like corner dynamics, fast layers from chaotic edge randomization."""
-    depths, mean_corner, mean_edge, std_corner, std_edge = compute_inter_state_block_distance(corner_idx, edge_idx,
-                                                                                              num_pairs_per_depth=300)
-    # model = SlowDynamics()
-    # simulate_block_dominated_evolution(model, corner_idx, edge_idx, T=100, num_trials=5)
-    mask = np.abs(w - 1) < 1e-6
-    V1 = V[:, mask]
-    for i, v in enumerate(invariants):
-        proj = V1 @ (V1.T @ v)
-        print(i, np.linalg.norm(proj))  # A_micro @ v - v 每个轨道平均向量 v 在 1-eigenspace 上的投影长度
-
-    if np.allclose(A_micro, A_micro.T, rtol=1e-8, atol=1e-8):
-        print("矩阵是对称的，可以使用 eigh")
-    asymmetry = np.linalg.norm(A_micro - A_micro.T)
-    print(f"不对称范数: {asymmetry}")
-
-    w, V = np.linalg.eigh(A_micro)  # 对称特征分解
-    mask = np.abs(w - 1) < 1e-8
-    dim1 = np.sum(mask)
-    print("dim1:", dim1)  # 24
-    V1 = V[:, mask]
-
-    mask_const = np.abs(w - 1.0) < 1e-8  # 提取守恒子空间
-    V_const = V[:, mask_const]  # (228, 24)
-    print("dim span {ρ(g)}=", group_algebra_dim(generators))  # 398:191/ 224:180
-    print('rank:', poly_rank(A_micro))  # 6
-    vals = np.round(w, 6)  # 防数值误差
+def compute_spectral_layers(A_micro, w, V):
+    """5 层谱投影器 E_k 和特征值 λ_k，基于 eigh 的实谱分解"""
+    vals = np.round(w, 6)
     unique, counts = np.unique(vals, return_counts=True)
+    layers = {}
+    for lam, dim in zip(unique[::-1], counts[::-1]):
+        mask = np.abs(w - lam) < 1e-8
+        E = V[:, mask] @ V[:, mask].T.conj()
+        layers[lam] = {'dim': dim, 'projector': E}
+    return layers
 
-    for u, c in zip(unique[::-1], counts[::-1]):
-        print(u, c)
-        """
-        1.0 24
-        0.777778 44
-        0.666667 32
-        0.555556 96
-        0.333333 32
-        k/9
-        | λ   | 维度 | 含义     |
-        | --- | -- | ------ |
-        | 1   | 24 | 守恒宏观变量 |
-        | 7/9 | 44 | 慢模态    |
-        | 2/3 | 32 | 次慢     |
-        | 5/9 | 96 | 中速     |
-        | 1/3 | 32 | 快速衰减   |
-        λ ≥ 2/3 24 + 44 + 32 = 100
-        
-        rank(generator algebra) ≈ 6 face turns
-        V = V_const ⊕ V_slow ⊕ V_fast
-        <20+64
-        Lie algebra generated by {ρ(g)} [ρ(g_i), ρ(g_j)] 不断闭包 只剩 4 维中心
-        18-> 224 commutator set: 224 = 8 × 28 分母 ≈ 28 pattern：4 or 8 的倍数 span dimension = 180
-        谱更集中 k / 28 ，operator algebra 实际自由度只有：6,224-180：44 个线性依赖
-        almost all multiples of 4
-        1.0        20
-        0.928571    4
-        0.821429    8
-        0.785714   36
-        0.732143   24
-        0.714286   72
-        0.491071    8
-        0.428571   24
-        0.321429   24
-        0.25        8
-        
-        18 generators
-        → span 18
-        → commutator closure 224
-        → representation dim 228
-        """
 
-    rank1 = np.linalg.matrix_rank(
-        np.vstack([
-            A_micro.reshape(-1),
-            (A_micro @ A_micro).reshape(-1),
-            (A_micro @ A_micro @ A_micro).reshape(-1),
-            (A_micro @ A_micro @ A_micro @ A_micro).reshape(-1),
-            (A_micro @ A_micro @ A_micro @ A_micro @ A_micro).reshape(-1),
-        ])
-    )
-    A = A_micro
-    I = np.eye(A.shape[0])
-    M = np.stack([
-        I.flatten(),
-        A.flatten(),
-        (A @ A).flatten()
-    ])
-    rank2 = np.linalg.matrix_rank(M)
+def verify_slow_approximation(A_micro, w, V, state_vector, T=100):
+    """慢子空间截断近似精度：T 步演化后绝对/相对误差 + 守恒层投影误差"""
+    mask_slow = w >= 2 / 3 - 1e-8
+    w_slow = w[mask_slow]
+    V_slow = V[:, mask_slow]
+    mask_const = np.abs(w - 1.0) < 1e-8
+    V_const = V[:, mask_const]
 
-    print("rank:", rank1, rank2)  # rank = 3
-    """
-    fast block 贡献 被投影消掉 或 线性相关
-    slow algebra 维度：3
-    rank-3 spectral projector family
-    宏观 dynamics 只需要 3 个统计变量
-    fast block dimension >> slow 但 flatten 后线性相关
-    span{I,A,A²,A³} rank=3
-    """
-    A3 = A @ A @ A
-    coef = np.linalg.lstsq(
-        np.stack([I.flatten(), A.flatten(), (A @ A).flatten()]).T,
-        A3.flatten(),
-        rcond=None
-    )
-    print("coef:", coef)
-
-    success, message, details = verify_bose_mesner(A_micro)
-    print("Success:", success)
-    print(message)
-    """
-    Number of distinct eigenvalues (classes): 5
-    Lambda 0.333333: multiplicity 32
-    Lambda 0.555556: multiplicity 96
-    Lambda 0.666667: multiplicity 32
-    Lambda 0.777778: multiplicity 44
-    Lambda 1.000000: multiplicity 24
-    Success: True
-    Verified as Bose-Mesner algebra with 5 classes.
-    This implies the Cayley graph is representation-equivalent to an association scheme (or substructure).
-    Phase1 子群的表示 ρ 具有极高的对称性，其像是一个 5-class association scheme。
-    5 个类对应 5 种“距离/关联类型”，特征值 k/9 很可能与生成元数 18 或某种组合计数有关
-    Phase1 子群的规范化转移算符在 228 维 faithful 表示下具有 5 个精确有理特征值（k/9），形成清晰的五层动力学。
-    提取 λ ≥ 2/3 的 100 维慢子空间模型，在 T ≤ 100 步内相对误差 < 6e-7，证明快层可安全截断。
-    生成元在慢/快层贡献均衡（≈46%/54%），但慢层主导长期行为。
-    谱结构具有近似 Bose-Mesner 性质（5 类、高退化、正交投影器近似成立），但生成元不完全闭合，无法严格归为 association scheme。
-    提出 Representation-Aware Heuristic d(x,y) = ||V_slow^T (x-y)||，作为高效、可计算的距离度量。
-    """
-
-    rho_flat_list = []
-    rho_products_list = []
-    for g in products:
-        rho_g = g.rho()
-        rho_flat = rho_g.flatten()  # (51984,)
-        rho_flat_list.append(np.real(rho_flat))  # 取实部简化
-        rho_products_list.append(rho_g)
-
-    rho_matrix = np.array(rho_flat_list)  # (num_products, 51984)
-
-    # 计算 rank
-    U_prod, S_prod, Vh_prod = np.linalg.svd(rho_matrix, full_matrices=False)
-    rank_rho = np.sum(S_prod > 1e-8 * S_prod[0])  # 有效奇异值数
-
-    print(f"span{{ρ(g)}} 维度 (rank) ≈ {rank_rho}")
-    print("前 10 个奇异值:", S_prod[:10])
-
-    # success, message, details = verify_association_scheme(A_micro, generators)
-    # print("Success:", success)
-    # print(message)
-    # print("p constants example (for i=0, j=1):", details['p_constants'][0, 1])
-
-    mask_slow = w >= 2 / 3 - 1e-8  # 7/9 容忍误差
-    print(f"慢子空间维度 (λ ≥ 2/3): {np.sum(mask_slow)}")
-    w_slow = w[mask_slow]  # 100
-    V_slow = V[:, mask_slow]  # 228 × 100 投影矩阵  舍弃128 维
-    print("w_slow:", V_slow.shape)
-    # Z = V.T @ state_vector
-    """
-    #z = V_slow.T @ x    # 100 维
-    """
-    V_fast = V[:, ~mask_slow]  # v - V_slow
-    for s_idx, rho_s in enumerate(generators):
-        rho_cross = V_fast.T @ rho_s @ V_slow
-        leak_norm = np.linalg.norm(rho_cross, 2)
-        U, S, Vh = np.linalg.svd(rho_cross)
-        print(f"Gen {s_idx}: cross leak_norm = {leak_norm:.4e},max leakage singular value:", S[0])
-    """
-    大部分生成元：leak_norm = 1.0000, max singular value ≈ 1.0000001
-    → 几乎完美的 rank-1 泄漏（最大奇异值 ≈1，其他奇异值 ≈0）。
-    少数生成元：leak_norm ≈ 0.8660, max singular value ≈ 0.8660255
-    → √3/2 ≈ 0.866，暗示某种 120° 或 60° 对称（三角形/六边形旋转）。
-
-    这些模式高度非随机，强烈指向对称群或双余类结构。
-    """
-
-    A_slow = V_slow.T.conj() @ A_micro @ V_slow  # (100,100) 约化矩阵
-    E_slow = V_slow @ V_slow.T.conj()  # (228, 228)
-    max_err_slow = 0.0
-    for s_idx, rho_s in enumerate(generators):
-        rho_V = rho_s @ V_slow
-        projected = E_slow @ rho_V
-        residual = rho_V - projected
-        err = np.linalg.norm(residual) / np.linalg.norm(rho_V + 1e-12)
-        max_err_slow = max(max_err_slow, err)
-        print(f"Gen {s_idx}: slow escape err = {err:.4e}")
-
-    print(f"慢子空间整体最大逃逸误差: {max_err_slow:.4e}")  # 4.5826e-01
-    """慢空间在单个生成元作用下会有接近 46% 的能量泄漏,慢子空间不是群不变子空间"""
-
-    success_slow, msg_slow, details_slow = verify_bose_mesner(A_slow)
-    print("慢子空间是否 Bose-Mesner:", success_slow)
-    print(msg_slow)
-
-    proj_slow = V_slow @ V_slow.T.conj()  # (228,228) 慢投影器
-
-    for rho_s in generators:
-        rho_proj = proj_slow @ rho_s @ proj_slow
-        error = np.linalg.norm(rho_s - rho_proj) / np.linalg.norm(rho_s)
-        print(f"Generator error to slow subspace: {error:.6e}")
-
-    """
-    慢子空间只捕捉了 ≈20% 的生成元作用（1 - 0.8 ≈ 0.2），这与你之前的误差评估（T=100 相对误差 < 6e-7）形成鲜明对比：
-    短期/中期：慢子空间近似极好（快层快速衰减）。
-    生成元层面：ρ(s) 本身主要由快层贡献（慢层只占小部分）
-    80% 的能量在快子空间。
-    每个 generator 有 80% 的能量在 slow 子空间之外。
-    """
-    proj_fast = np.eye(228) - V_slow @ V_slow.T.conj()
-    for rho_s in generators:
-        slow_contrib = np.linalg.norm(V_slow.T @ rho_s @ V_slow)
-        fast_contrib = np.linalg.norm(proj_fast @ rho_s @ proj_fast)
-        print(f"Slow/Fast norm ratio: {slow_contrib / (slow_contrib + fast_contrib):.4f}")
-    """慢贡献 ≈46%，快贡献 ≈54%"""
-
-    A_fast = proj_fast @ A_micro @ proj_fast
-    eigvals = np.linalg.eigvals(A_fast)
-    rho_f = np.max(np.abs(eigvals))  # rho_f = 5/9
-
-    print("快层谱半径 ≈", rho_f)  # 0.5555557144099942  5/9
-    """
-    平均演化在快层是强收缩的（指数衰减）
-    快层近 Ramanujan 图
-    """
-    epsilon = 1e-6
-    t_mix = np.log(1 / epsilon) / (-np.log(rho_f))  # 快层谱半径
-    print(f"混合时间 tmix({epsilon}) ≈ {t_mix:.4f} 步")  # 23.5043 步
-    """
-    生成集合的 Cayley 图几乎在几何尺度和谱尺度上都达到“临界最优
-    混合时间 ≈ 直径
-    ”"""
-    d_fast = 12  # 假设快层对应 d=12 (棱块维度)
-    ramanujan_fast = 2 * np.sqrt(d_fast - 1) / d_fast
-    gap_fast = rho_f - ramanujan_fast
-
-    print(f"\n快层 ρ_f = {rho_f:.6f}")
-    print(f"Ramanujan 界 (d={d_fast}) = {ramanujan_fast:.6f}")
-    print(f"快层差距 = {gap_fast:.6f}")
-    """
-    快层差距 = 0.002785
-    在 slow 模剔除后，剩余动力学接近最优扩展子
-    """
-
-    lambda2 = 7 / 9  # (λ₂, 次大)
-    d = len(moves)  # 18
-    ramanujan_bound = 2 * np.sqrt(d - 1) / d
-    gap = abs(lambda2) - ramanujan_bound
-    print(f"λ₂ = {lambda2:.6f}")
-    print(f"Ramanujan 界 (d={d}) = {ramanujan_bound:.6f}")
-    print(f"差距 = {gap:.6f}")
-
-    print(np.unique(np.round(np.linalg.eigvals(A_micro), 6)))
-    print(np.unique(np.round(np.linalg.eigvals(A_fast), 6)))
-    """
-    [0.333333+0.j 0.555556+0.j 0.666667+0.j 0.777778+0.j 1.      +0.j]
-    [0.      +0.j 0.333333+0.j 0.555555+0.j 0.555556+0.j]
-    """
-    unique, counts = np.unique(np.round(np.linalg.eigvals(A_micro), 6), return_counts=True)
-    for u, c in zip(unique[::-1], counts[::-1]):
-        print(u, c)
-    """
-    (1+0j) 24
-    (0.777778+0j) 44
-    (0.666667+0j) 32
-    (0.555556+0j) 96
-    (0.333333+0j) 32
-    
-    20 步基本只剩 λ₂
-    0.666^20 ≈ 3e-4
-    0.555^20 ≈ 1e-5
-    0.333^20 ≈ 3e-10
-    """
-
-    print('rank:', poly_rank(A_micro), poly_rank(A_slow), poly_rank(A_fast))  # 5 6 4
-    """slow operator rank = 6
-    fast operator rank = 4
-    """
-    results, message = check_invariant_subspaces(A_micro, generators, w, V)
-    print(message)
-    for lam, res in results.items():
-        print(
-            f"λ={lam:.6f}: dim={res['multiplicity']}, invariant={res['is_invariant']}, max_err={res['max_error']:.2e}")
-    """
-    λ = 1.000000 (dim= 24) → 不变 (invariant)
-    ------------------------------------------------------------
-
-    总结：5 个子空间中，有 1 个完全不变。
-    并非所有子空间都完全不变，说明表示并非完全分解成 5 个 irreps。
-    但慢层（λ ≥ 2/3）的不变性值得进一步关注。
-    λ=0.333333: dim=32, invariant=False, max_err=7.07e-01
-    λ=0.555556: dim=96, invariant=False, max_err=5.95e-01
-    λ=0.666667: dim=32, invariant=False, max_err=6.12e-01
-    λ=0.777778: dim=44, invariant=False, max_err=6.40e-01
-    λ=1.000000: dim=24, invariant=True, max_err=7.40e-08
-    Phase-1 子群在表示空间中只有部分对称性（主要是守恒层），而其他层级的对称性被“平均”出来了（A_micro 的谱退化），但单个元素 ρ(s) 不足以维持这些层的不变性
-    守恒层（24维）：对应群的不变子空间（trivial + 一些 1D 表示），所有 ρ(s) 都保持它不变。
-    慢层（7/9 + 2/3）：对应某些“准对称”模式（quasi-symmetric），在平均 A_micro 上退化，但单个转动会轻微混合这些模式（误差 ~0.6）。
-    快层：完全混合，无对称性。
-    """
-
-    shells = shell_projector(samples=1000)
-    print("shell statistics:")
-    P = {}
-    for d, mats in shells.items():
-        mats = np.array(mats)
-
-        mean = np.mean(mats, axis=0)
-        P[d] = mean
-
-        dev = np.mean([np.linalg.norm(m - mean) for m in mats])
-
-        print(f"shell {d:2d}  samples={len(mats):3d}  deviation={dev:.6f}")
-
-    fit_shell_decomposition(A_micro, P)  # relative error: 0.81069374
-    """low-rank group convolution operator"""
-
-    # print("commutant dimension =", commutant_dimension(generators))
-    dim_comm = estimate_commutant_dim(generators, n=228, num_samples=1000)
-    print("估计 dim Comm(ρ(G)) ≈", dim_comm)  # 336/836
-    print("对应不可约表示数 ≈", 228 / dim_comm)
-
-    """
-    估计 dim Comm(ρ(G)) ≈ 336/836
-    单个生成元作用并不完全保持这些层不变 → 统计对称性（quasi-symmetry）
-    其余层（慢层 ~76 维 + 快层 128 维）形成一个大约 204 维的可约表示，内部有统计对称性
-    这不是标准的 Hamming/Johnson scheme
-    
-    也不是完整 Bose-Mesner algebra
-
-    极有可能是 Hecke-type / double coset algebra 的统计近似版本
-    """
-
-    num_samples = 1000  # 采样数
-    double_cosets = set()
-    for _ in range(num_samples):
-        g = CubieBase.random_walk(length=50)
-        # Normalize to canonical rep: find min k1 g k2 or something
-        # To avoid, use a proxy: the trace of rho(g) or some invariant
-        rho_g = g.rho()
-        trace = np.trace(rho_g).real  # example invariant
-        frobenius = np.linalg.norm(rho_g, 'fro')  # another
-        # or tuple of sorted eigvals, but expensive
-        eig = np.sort(np.real(np.linalg.eigvals(rho_g)))
-        canonical = tuple(np.round(eig, 4))  # round to avoid float error
-        double_cosets.add(canonical)
-
-    print("估算双余类数 (based on sample invariants):", len(double_cosets))  # 854
-    if len(double_cosets) == 5:
-        print("第一关通过: 双余类数 ≈ 5")
-    else:
-        print("第一关失败: 双余类数 ≈", len(double_cosets))
-        """
-        The spectral stratification arises not from a classical association scheme, but from the isotypic decomposition of the faithful 228-dimensional representation under generator averaging.
-        
-        The Rubik's cube group is a paradigmatic example of a large discrete symmetry group with rich combinatorial structure. In this work, we investigate the spectral properties of the normalized transfer operator A = (1/|S|) ∑_{s∈S} ρ(s) in the faithful 228-dimensional representation of the Phase-1 subgroup, where S is the set of generators (18 primitive + 9 slice moves).The operator exhibits exactly five distinct rational eigenvalues of the form k/9 (k=3,5,6,7,9) with high multiplicities (32,96,32,44,24), and its spectral projectors satisfy the Bose–Mesner algebra conditions (idempotence, orthogonality, and completeness). However, individual generators ρ(s) do not preserve the eigenspaces (cross-layer leakage ≈0.42–0.71), ruling out a full association scheme or Gelfand pair structure.Despite this, the subspace spanned by eigenvalues λ ≥ 2/3 (dimension 100) shows quasi-invariance under group action, with leakage error ≈0.42–0.46. Projecting dynamics onto this slow manifold yields highly accurate approximations: relative error < 6×10^{-7} for T=100 steps, demonstrating that fast modes (λ < 2/3) can be safely truncated.We propose a representation-aware heuristic distance d(x,y) = ||V_slow^T (x-y)||, which leverages the slow projection to ignore transient modes. These findings reveal a striking separation between averaged symmetry (captured by A) and instantaneous asymmetry (in ρ(s)), offering a computable low-dimensional world model for discrete group actions in puzzle solving and beyond.
-        """
-    """平均对称性主导的慢动力学,存在一个 5 维 Hecke-type 代数，但它不是 Gelfand pair。"""
-
-    mask_mid = (w >= 2 / 3 - 1e-8) & (w < 7 / 9 + 1e-8)  # 只看 2/3 层
-    V_mid = V[:, mask_mid]
-    for rho_s in generators:  # 每个 ρ(s) 在慢层内部的谱泄漏
-        leak_to_mid = np.linalg.norm(V_mid.T @ rho_s @ V_slow)
-        print(leak_to_mid)
-    """
-    76 维只是平均算子下退化
-    4.472136  ≈ √20
-    5.656854  ≈ √32
-    生成元在慢层之间的耦合不是连续变化的
-
-    而是落在有限个固定数值上
-    
-    这正是 “Hecke 型双余类结构” 的典型信号
-    """
-    max_comm_norm = check_commutativity(generators, V_slow)
-    print("max_comm_norm=", max_comm_norm)
-    gspan = group_algebra_dim(generators)
-    print("dim span {ρ(g)}=", gspan)  # = 18
-    slow_algebra_dimension(generators, V_slow)  # 慢层生成代数维度 ≈ 18
-
-    P = V_slow @ V_slow.T.conj()
-    dim, msg = compute_span_dim(P, generators)
-    print(msg)  # span{P ρ(s) P} 维度 ≈ 11
-    """
-    ρ(g) lives in a tiny algebra
-    慢层生成代数维度 ≈ 18
-    → 基本等于生成元数量
-    → 说明慢层上的 ρ(s) 基本线性独立
-    dim(𝒜) ≈ 11 (from previous: 11)
-    dim(𝒜²) ≈ 20
-    dim(𝒜²) - dim(𝒜) = 9
-    dim(𝒜²) >> dim(𝒜) → 非闭合，只是谱退化现象
-    span{P ρ(s) P} 维度 ≈ 11
-    
-    一个非交换生成元代数
-    在平均算子下出现 5 个谱退化层
-    在慢空间压缩后形成一个 ~11 维低维代数
-    """
-
-    leakage_bounds(generators, V_slow)
-
-    analyze_fast_pseudospectrum(A_micro, V_slow, t_max=30)
-    """谱半径 ρ = 0.5555557144099934
-    非正规性 ‖AA* - A*A‖ = 5.749921133840414e-16
-    特征向量条件数 κ(V) = 139.9906737469503
-    t=1..10 实际 ‖A_f^t‖:
-    [np.float64(0.5555557144099954), np.float64(0.30864215181359983), np.float64(0.17146791114784266), np.float64(0.09525997787612925), np.float64(0.05292222506365333), np.float64(0.029401244553404465), np.float64(0.016334029422409597), np.float64(0.009074463384960643), np.float64(0.005041369988719153), np.float64(0.002800761905687978)]
-    理论 ρ^t (前10):
-    [np.float64(0.5555557144099934), np.float64(0.30864215181359816), np.float64(0.17146791114784116), np.float64(0.09525997787612817), np.float64(0.05292222506365255), np.float64(0.02940124455340395), np.float64(0.01633402942240926), np.float64(0.00907446338496043), np.float64(0.005041369988719018), np.float64(0.0028007619056878946)]
-    说明特征向量基 V 是数值稳定的，投影/重构几乎无放大误差
-    """
-    estimate_fast_lyapunov(generators, V_slow, T=2000)
-    """
-    最大 Lyapunov 指数 λ ≈ -0.00019139141269984905
-    对应指数率 e^λ ≈ 0.9998086269014682
-    平均谱退化 → 统计对称性
-    瞬时生成元 → 几乎保持 norm 快层几乎是**保范（norm-preserving）**的。
-    整个系统是渐近稳定的（asymptotically stable），状态会缓慢趋向平衡（solved 附近）
-    一个具有统计谱分层（statistical spectral stratification）的非交换表示，平均算符下出现 5 个高度退化的谱层，单个生成元导致强跨层混合，但慢动力学表现出极高的可计算性和稳定性。
-    由对称性导致的简并模式成为谱的主要特征。
-    """
-    # mask / 投影器（已从 eigh 得到） Rank-6 Attention Operator
-    E1 = V[:, np.abs(w - 1.0) < 1e-8] @ V[:, np.abs(w - 1.0) < 1e-8].T.conj()
-    E7_9 = V[:, np.abs(w - 7 / 9) < 1e-6] @ V[:, np.abs(w - 7 / 9) < 1e-6].T.conj()
-    E5_9 = V[:, np.abs(w - 5 / 9) < 1e-6] @ V[:, np.abs(w - 5 / 9) < 1e-6].T.conj()
-    E1_3 = V[:, np.abs(w - 1 / 3) < 1e-6] @ V[:, np.abs(w - 1 / 3) < 1e-6].T.conj()
-    E2_3 = V[:, np.abs(w - 2 / 3) < 1e-6] @ V[:, np.abs(w - 2 / 3) < 1e-6].T.conj()  # 如果 2/3 独立
-
-    # 重建 A
-    A_reconstructed = (
-            1.0 * E1 +
-            (7 / 9) * E7_9 +
-            (2 / 3) * E2_3 +
-            (5 / 9) * E5_9 +
-            (1 / 3) * E1_3
-    )
-
-    # 检查重建误差
-    recon_error = np.linalg.norm(A_micro - A_reconstructed)
-    print(f"重建误差: {recon_error:.2e}")  # 应 < 1e-10 或更小 重建误差: 1.13e-06
-    M_layers = [E1, E7_9, E2_3, E5_9, E1_3]
-    lambda_list = [1.0, 7 / 9, 2 / 3, 5 / 9, 1 / 3]
-    multiplicities = [24, 44, 32, 96, 32]  # 投影器已经包含了这个信息
-    alpha = np.array(multiplicities) / sum(multiplicities)  # 归一化成概率分布
-    # attention 演化精度
-    initial_rho = CubieMove.identity().rho()
-    x = initial_rho.copy().astype(complex)
-    for t in range(100):
-        x_exact = A_micro @ x
-        x_attn = attention_evolve_exact(x, lambda_list, M_layers)
-        error = np.linalg.norm(x_attn - x_exact)
-        print(f"T={t}: attention 误差 = {error:.2e}")
-        x = x_exact
-
-    """
-    重建误差: 1.20e-06
-    T=0: attention 误差 = 1.10e-06
-    T=1: attention 误差 = 7.93e-07
-    T=2: attention 误差 = 6.39e-07
-    T=3: attention 误差 = 5.61e-07
-    T=4: attention 误差 = 5.20e-07
-    T=5: attention 误差 = 4.98e-07
-    T=6: attention 误差 = 4.86e-07
-    T=96: attention 误差 = 4.68e-07
-    T=97: attention 误差 = 4.68e-07
-    T=98: attention 误差 = 4.68e-07
-    T=99: attention 误差 = 4.68e-07
-    精确分解
-    
-    eigenvalues 是 有理数
-    rank 很低
-    attention 可以精确分解
-    """
-
-    # k_generators = []  # K 生成元: all delta == 0 的 moves
-    # for m in moves:  # all_moves.values()
-    #     if all(d == 0 for d in m.corners_ori_delta) and all(d == 0 for d in m.edges_ori_delta):
-    #         k_generators.append(m)
-    # print("K 生成元数:", len(k_generators))  # 10 phase2
-    # K = CubieBase.generate_group(k_generators, max_depth=10, max_groups=1000)
-    # print("生成 K 大小 (approximate):", len(K))
-
-    state_vector = CubieState.solved().vector  # 给定初始状态 x₀
-    z0 = V_slow.T @ state_vector  # (100,) 投影到慢子空间 V_slow.T.conj() @ state_vector
-    print("z0:", z0.shape)
-    T = 50  # 示例步数
-    zT = z0 * (w_slow ** T)  # (100,) 预测 T 步 指数衰减
-    xT_approx = V_slow @ zT  # (228,) 还原回原空间
-
-    xT_exact = np.linalg.matrix_power(A_micro, T) @ state_vector  # 真实 T 步（贵）
-    error = np.linalg.norm(xT_approx - xT_exact)
-    print(f"T={T} 步近似误差范数: {error:.6e}")
-    print(f"相对误差: {error / np.linalg.norm(xT_exact):.6e}")
-
-    # 取前3个慢坐标随时间演化
-    T_steps = np.arange(0, 101)
-    Z = np.zeros((len(T_steps), len(z0)), dtype=np.complex128)  # (101,100)
-    for i, t in enumerate(T_steps):
-        Z[i] = z0 * (w_slow ** t)  # np.real(z0 * (w_slow ** t))
-    Z = np.real(Z)
-
-    T = 100
+    z0 = V_slow.T @ state_vector
+    xT_approx = V_slow @ (z0 * (w_slow ** T))
     true_x = state_vector.copy()
     for _ in range(T):
         true_x = A_micro @ true_x
 
-    xT_approx = V_slow @ Z[T]
     error_norm = np.linalg.norm(xT_approx - true_x)
     rel_error = error_norm / np.linalg.norm(true_x)
-    print(f"  绝对误差范数: {error_norm:.6e}")
-    print(f"  相对误差:     {rel_error:.6e}")
     const_true = V_const.T @ true_x
     const_approx = V_const.T @ xT_approx
     error_const = np.linalg.norm(const_approx - const_true)
-    print(f"守恒层投影误差 (T={T}): {error_const:.6e}")
-    """  
-    绝对误差范数: 1.513582e-06
-    相对误差:     6.179170e-07
-    守恒层投影误差 (T=100): 1.390568e-06
-    """
+    return {'abs_error': error_norm, 'rel_error': rel_error, 'const_error': error_const}
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.plot(Z[:, 0], Z[:, 1], Z[:, 2], label='慢坐标轨迹')
-    ax.set_xlabel('z1')
-    ax.set_ylabel('z2')
-    ax.set_zlabel('z3')
-    plt.title('Slow manifold trajectory in 3D projection')
-    plt.legend()
-    plt.show()
 
-    # T_max = 2000  # 展示慢层截断的安全性
-    # norms = []
-    # A_power = np.eye(A_fast.shape[0])
-    # for t in range(1, T_max + 1):
-    #     A_power = A_power @ A_fast
-    #     norms.append(np.linalg.norm(A_power, 2))
-    #
-    # plt.figure()
-    # plt.plot(range(1, T_max + 1), norms)
-    # plt.xlabel("T")
-    # plt.ylabel("||A_f^T||_2")
-    # plt.title("Fast-layer norm growth ||A_f^T||")
-    # # plt.savefig("data/Fast-layer norm growth.png", dpi=300, bbox_inches='tight')
-    # plt.show()
-
-    # Estimate exponential rate from linear fit of log(norm)
-
-    # log_norms = np.log(np.array(norms) + 1e-12)
-    # coef = np.polyfit(range(1, T_max + 1), log_norms, 1)
-    # lyap_est = coef[0]
-    #
-    # print("Estimated Lyapunov exponent from power growth ≈", lyap_est)
-    # print("Estimated exp(lambda) ≈", np.exp(lyap_est))
-    # 初始化模型
-
-    # 选择最慢的模式（第一个列）
-    phi = V[:, 0]  # slowest eigenvector (228,)
-    lam = w[0]  # 对应特征值，通常 ≈1.0 或 7/9
-
-    # 采样状态和动作
-    n_samples = 2000  # 建议 1000–5000
-    values = []
-
-    print("开始采样并计算群谐误差...")
-
-    for i in range(n_samples):
-        if i % 500 == 0:
-            print(f"{i}/{n_samples}")
-
-        # 随机状态 x
-        state_x = CubieBase.generate_cubie(length=np.random.randint(0, 40))
-        x = state_x.vector  #
-
-        # 随机动作 g（短路径随机 walk）
-        g = CubieBase.random_walk(length=np.random.randint(1, 6))  # 1–5 步随机 g
-        gx = g.act(state_x).vector  # 或 g.rho() @ x
-
-        # 计算 φ(gx) - λ φ(x)
-        phi_gx = np.dot(phi, gx)
-        lam_phi_x = lam * np.dot(phi, x)
-        diff = phi_gx - lam_phi_x
+def compute_harmonic_error(phi, lam, n_samples=2000, max_depth=40):
+    """采样计算群谐函数误差 φ(gx) - λ φ(x)，返回 (values, vals, depths)"""
+    Moves = list(CubieMove.prim_moves.values())
+    values, vals, depths = [], [], []
+    for sample in range(n_samples):
+        if sample % 500 == 0:
+            print(f"  {sample}/{n_samples}")
+        d = np.random.randint(0, max_depth)
+        state_x = CubieBase.generate_cubie(length=d)
+        x = state_x.vector
+        phi_x = np.dot(phi, x)
+        vals2 = []
+        for s in Moves:
+            sx = s.act(state_x).vector
+            vals2.append(np.dot(phi, sx))
+        mean_val = np.mean(vals2)
+        diff = mean_val - lam * phi_x
         values.append(diff)
-
-    # 统计误差
+        vals.append(phi_x)
+        depths.append(d)
     values = np.array(values)
-    mean_error = np.mean(values)
-    std_error = np.std(values)
-    max_error = np.max(np.abs(values))
+    return values, np.array(vals), np.array(depths)
 
-    print("\n群谐函数误差统计：")
-    print(f"均值: {mean_error:.6f}")
-    print(f"标准差: {std_error:.6f}")
-    print(f"最大绝对误差: {max_error:.6f}")
-    """
-    前 24 个 trivial 层全为 0
-    群谐函数误差统计：
-    均值: 0.000000+0.000000j
-    标准差: 0.000000
-    最大绝对误差: 0.000000
-    """
 
-    plt.axvline(0, color='red', ls='--', label='理想误差 = 0')
-
-    # 分布可视化
-    plt.figure(figsize=(10, 6))
-    plt.hist(values.real, bins=100, density=True, alpha=0.7, color='skyblue', edgecolor='black', label='Real part')
-    plt.hist(values.imag, bins=100, density=True, alpha=0.7, color='salmon', edgecolor='black', label='Imag part')
-    plt.axvline(0, color='red', ls='--', label='理想误差 = 0')
-    plt.xlabel('误差: φ(gx) - λ φ(x)')
-    plt.ylabel('密度')
-    plt.title(f'最慢模式 φ_1 的群谐函数误差分布 (n={n_samples})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig("data/最慢模式 φ_1 的群谐函数误差分布.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    phis = V[:, 24:24 + 44]  # λ=7/9 block
-    # Gram matrix
-    G = phis.T @ phis
-    plt.figure(figsize=(12, 12))
-    plt.imshow(G.real, cmap='hot', interpolation='nearest')
-    plt.colorbar(label='Real part of G[i,j]')
-    plt.title('Gram Matrix of 44 Slow Modes (λ = 7/9)')
-    plt.xlabel('Mode index')
-    plt.ylabel('Mode index')
-    plt.savefig(r"data/Gram Matrix of 44 Slow Modes.png", dpi=300, bbox_inches='tight')
-    plt.show()
-    """特征向量是严格正交的。
-    退化子空间内的 44 个向量是正交基,正交基保证了模式之间不耦合，泄漏主要来自 λ 间的谱间隙，而不是向量间的非正交性"""
-    x = []
-    y = []
-    phi1 = V[:, 24]  # λ=7/9
-    phi2 = V[:, 25]
-    for _ in range(10000):
-        s = CubieBase.generate_cubie(length=40)
-        v = s.vector
-
-        x.append(phi1 @ v)
-        y.append(phi2 @ v)
-
-    plt.scatter(x, y, s=2)
-    plt.title("Slow mode embedding")
-    plt.show()
-    """四个点 = 有限群表示的轨道 四个离散点（±1, ±1 的组合） (Z₂)^k × continuous diffusion subspace
-     λ=7/9 子空间的表示是高度退化的，投影到任意两个向量上，值域被有限对称性约束（很可能 parity × orientation mod 2 或类似 Z₂ × Z₂ 作用）"""
-
-    # 扩展实验参数
-    start = 24
-    n_modes = 10  # 测试前 10 个慢模式
-    n_samples_per_mode = 2000  # 每个模式采样数
-
-    # 预计算前 n_modes 个特征向量和特征值
-    phi_list = [V[:, start + i] for i in range(n_modes)]
-    lam_list = w[start:start + n_modes]
-
-    # 结果存储
-    error_stats = []  # list of dict {'mode': i, 'mean': , 'std': , 'max_abs': }
-
-    print("开始扩展群谐函数验证实验...")
+def compute_harmonic_error_by_block(V, w, start, n_modes=10, n_samples_per_mode=2000):
+    """批量计算从 start 开始的 n_modes 个模式的群谐误差统计"""
     Moves = list(CubieMove.prim_moves.values())
+    error_stats = []
     for mode_idx in range(n_modes):
-        phi = phi_list[mode_idx]
-        lam = lam_list[mode_idx]
-        values = []  # 每个采样的误差
-        vals = []
-        depths = []
-
-        print(f"\n测试模式 {mode_idx + 1} (λ = {lam:.6f})...")
+        phi = V[:, start + mode_idx]
+        lam = w[start + mode_idx]
+        print(f"\n模式 {mode_idx + 1} (λ = {lam:.6f})...")
+        values = []
         for sample in range(n_samples_per_mode):
             if sample % 500 == 0:
                 print(f"  {sample}/{n_samples_per_mode}")
-
-            # 随机状态 x
             d = np.random.randint(0, 40)
             state_x = CubieBase.generate_cubie(length=d)
-            x = state_x.vector  #
-
-            vals2 = []
-            for s in Moves:
-                sx = s.act(state_x).vector
-                vals2.append(np.dot(phi, sx))  # 或 g.rho() @ x
-
-            # 计算 φ(gx) - λ φ(x)
-            phi_x = np.dot(phi, x)
-            mean_val = np.mean(vals2)
-            lam_phi_x = lam * phi_x
-            diff = mean_val - lam_phi_x
-            values.append(diff)
-
-            vals.append(phi_x)
-            depths.append(d)
-
-        # 统计
+            x = state_x.vector
+            vals2 = [np.dot(phi, s.act(state_x).vector) for s in Moves]
+            values.append(np.mean(vals2) - lam * np.dot(phi, x))
         values = np.array(values)
-        mean_err = np.mean(values)
-        std_err = np.std(values)
-        max_abs_err = np.max(np.abs(values))
-
         error_stats.append({
-            'mode': mode_idx + 1,
-            'lambda': lam,
-            'mean': mean_err,
-            'std': std_err,
-            'max_abs': max_abs_err
+            'mode': mode_idx + 1, 'lambda': lam,
+            'mean': np.mean(values), 'std': np.std(values),
+            'max_abs': np.max(np.abs(values)),
+            'values': values,
         })
+    return error_stats
 
-        # 可视化每个模式的误差分布
-        plt.figure(figsize=(8, 6))
-        plt.hist(values.real, bins=100, density=True, alpha=0.7, color='skyblue', edgecolor='black', label='Real part')
-        plt.hist(values.imag, bins=100, density=True, alpha=0.7, color='salmon', edgecolor='black', label='Imag part')
-        plt.axvline(0, color='red', ls='--', label='理想误差 = 0')
-        plt.xlabel('误差: φ(gx) - λ φ(x)')
-        plt.ylabel('密度')
-        plt.title(f'模式 {mode_idx + 1} (λ={lam:.6f}) 的群谐函数误差分布')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        if mode_idx in (1, 7, 8):
-            plt.savefig(f"data/模式 {mode_idx + 1} (lam={lam:.6f}) 的群谐函数误差分布.png", dpi=300,
-                        bbox_inches='tight')
-        plt.show()
 
-        plt.scatter(depths, vals)
-        plt.show()
-
-    # 总结所有模式
-    print("\n所有模式群谐误差总结:")
-    for stat in error_stats:
-        print(
-            f"模式 {stat['mode']}: λ={stat['lambda']:.6f}, 均值={stat['mean']:.6f}, std={stat['std']:.6f}, max_abs={stat['max_abs']:.6f}")
-
-    """
-    所有模式群谐误差总结:
-    模式 1: λ=0.777778, 均值=0.012333+0.000000j, std=0.171942, max_abs=0.444444
-    模式 2: λ=0.777778, 均值=0.012444+0.000000j, std=0.169766, max_abs=0.444444
-    模式 3: λ=0.777778, 均值=0.012778+0.000000j, std=0.169559, max_abs=0.444444
-    模式 4: λ=0.777778, 均值=0.014833+0.000000j, std=0.165241, max_abs=0.444444
-    模式 5: λ=0.777778, 均值=0.009778+0.000000j, std=0.169066, max_abs=0.444444
-    模式 6: λ=0.777778, 均值=0.020444+0.000000j, std=0.170516, max_abs=0.444444
-    模式 7: λ=0.777778, 均值=0.018278+0.000000j, std=0.171610, max_abs=0.444444
-    模式 8: λ=0.777778, 均值=0.013833+0.000000j, std=0.170620, max_abs=0.444444
-    模式 9: λ=0.777778, 均值=0.000000+0.000000j, std=0.000000, max_abs=0.000000
-    模式 10: λ=0.777778, 均值=0.000000+0.000000j, std=0.000000, max_abs=0.000000
-    慢动力学本质上是“守恒谐函数 + 准谐衰减”的组合
-    谐性质只严格保持在前 8 个模式（对应 λ ≈1 的守恒/准守恒部分），一旦进入 λ <1 的非守恒慢层（e.g. 7/9 或 2/3），群作用开始引入扰动，误差从 0 跳到 O(1) 量级
-    0.444444=4/9
-    第二类（mode9–10）刚好落在一个完全对称的子空间 basis
-    8 个 ≈ 数值基
-    2 个 ≈ 对称基
-    慢子空间的前 10 个模式（λ ≈ 7/9）全部是准谐函数，误差稳定在 0.17 左右，最大不超过 0.444。
-    这远低于随机向量在群作用下的扰动（通常 O(1) 或更大），证明慢层确实捕捉了群上的低频谐波。
-    误差的固定幅度（≈4/9）暗示扰动来源于谱层间距，而非随机混沌 → 慢流形具有结构化准不变性。
-    φ(x) 是一个二值函数 Z2 blocks
-    d 偶 → +c
-    d 奇 → -c
-    2 moves 会 flip
-    """
-
-    start = 24 + 44  # λ = 2/3 的 32 个模式
-    n_modes = 10  # 测试前 10 个慢模式
-    n_samples_per_mode = 2000  # 每个模式采样数
-
-    # 预计算前 n_modes 个特征向量和特征值
-    phi_list = [V[:, start + i] for i in range(n_modes)]
-    lam_list = w[start:start + n_modes]
-
-    # 结果存储
-    error_stats = []  # list of dict {'mode': i, 'mean': , 'std': , 'max_abs': }
-
-    print("开始扩展群谐函数验证实验...")
-    Moves = list(CubieMove.prim_moves.values())
-    for mode_idx in range(n_modes):
-        phi = phi_list[mode_idx]
-        lam = lam_list[mode_idx]
-        values = []  # 每个采样的误差
-        vals = []
-        depths = []
-        ratios = []
-
-        print(f"\n测试模式 {mode_idx + 1} (λ = {lam:.6f})...")
-        for sample in range(n_samples_per_mode):
-            if sample % 500 == 0:
-                print(f"  {sample}/{n_samples_per_mode}")
-
-            # 随机状态 x
-            d = np.random.randint(0, 40)
-            state_x = CubieBase.generate_cubie(length=d)
-            x = state_x.vector  #
-            phi_x = np.dot(phi, x)
-
-            vals2 = []
-            for s in Moves:
-                sx = s.act(state_x).vector
-                phi_sx = np.dot(phi, sx)
-                vals2.append(phi_sx)  # 或 g.rho() @ x
-                ratios.append(phi_sx / phi_x)
-
-            # 计算 φ(gx) - λ φ(x)
-            mean_val = np.mean(vals2)
-            lam_phi_x = lam * phi_x
-            diff = mean_val - lam_phi_x
-            values.append(diff)
-
-            vals.append(phi_x)
-            depths.append(d)
-
-        # 统计
-        values = np.array(values)
-        mean_err = np.mean(values)
-        std_err = np.std(values)
-        max_abs_err = np.max(np.abs(values))
-
-        # print(set(np.round(ratios, 6)))
-
-        error_stats.append({
-            'mode': mode_idx + 1,
-            'lambda': lam,
-            'mean': mean_err,
-            'std': std_err,
-            'max_abs': max_abs_err
-        })
-
-        # 可视化每个模式的误差分布
-        plt.figure(figsize=(10, 8))
-        plt.hist(values.real, bins=100, density=True, alpha=0.7, color='skyblue', edgecolor='black', label='Real part')
-        plt.hist(values.imag, bins=100, density=True, alpha=0.7, color='salmon', edgecolor='black', label='Imag part')
-        plt.axvline(0, color='red', ls='--', label='理想误差 = 0')
-        plt.xlabel('误差: φ(gx) - λ φ(x)')
-        plt.ylabel('密度')
-        plt.title(f'模式 {mode_idx + 1} (λ={lam:.6f}) 的群谐函数误差分布')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        if mode_idx in (1, 9):
-            plt.savefig(f"data/模式 {mode_idx + 1} (lam={lam:.6f}) 的群谐函数误差分布.png", dpi=300,
-                        bbox_inches='tight')
-        plt.show()
-
-        plt.scatter(depths, vals)
-        plt.show()
-
-    # 总结所有模式
-    print("\n所有模式群谐误差总结:")
-    for stat in error_stats:
-        print(
-            f"模式 {stat['mode']}: λ={stat['lambda']:.6f}, 均值={stat['mean']:.6f}, std={stat['std']:.6f}, max_abs={stat['max_abs']:.6f}")
-    """φ 不是 random walk eigenfunction。φ 不是 generator 的共同特征向量
-    λ = 2/3 模式不是“随机扩散模态”，而是 对每个 generator 都严格成立的线性本征方向。
-    λ = 1
-    守恒量：
-    φ(sx) = φ(x)
-    λ = 2/3
-    ρ(s)φ ≠ λφ
-    对单个 move 不成立,群表示 ρ 的一个共同不变子空间（ρ(G)-invariant subspace），但不是单个 ρ(s) 的本征空间。
-    λ = 7/9
-    随机扩散模式：
-    E[φ(sx)] = (7/9) φ(x)
-    但单步波动大。
-    分解成几个 block：
-    trivial
-    parity
-    scaling
-    diffusion
-    Trivial block (λ=1, dim=24)
-    精确不变子空间（invariant subspace）。
-    ρ(s) V_trivial = V_trivial（identity action 或 trivial representation 的多重性）。
-    对应守恒宏观变量（总 parity、总朝向和等）。
-    群谐误差 = 0（最严格）。
-    
-    Parity block (可能嵌入在 λ=1 或附近)
-    对应边/角 parity（Z2 对称）。
-    在某些子空间上 ρ(s) 作用为 ±1（sign flip）。
-    通常与 trivial 层混合，但保持不变。
-    
-    Scaling block (λ=7/9, dim=44 + 部分 λ=1 的尾部)
-    准不变子空间（quasi-invariant）。
-    ρ(s) V_scaling ≈ (7/9) V_scaling + 小扰动（误差 ≈0.17）。
-    对应“集体缩放”模式（e.g. 朝向或置换的均匀收缩）。
-    群谐误差小但非零（准谐函数）。
-    
-    Diffusion block (λ=2/3, dim=32)
-    严格线性本征方向（exact eigenvector direction）。
-    对每个生成元 s，ρ(s) V_diffusion = (2/3) V_diffusion（标量缩放）。
-    对应“扩散-like”模式，但不是随机扩散，而是纯缩放扩散（pure scaling diffusion）。
-    群谐误差 = 0（在采样精度内）。
-    
-    剩余层 (λ=5/9, 1/3, dim=96+32)
-    混合更强，扰动大，接近“随机化”但仍有结构（奇异值稳定在 1 或 √3/2）。
-    群谐误差可能较大（未测试）。
-    """
-
-    # 参数
-    rho_f = 5 / 9
-    gamma_s = 1 - 7 / 9  # 亚慢 gap
-    Tf = int(np.log(1e-6) / -np.log(rho_f))  # ≈23-24
-    T_anneal = int(5 / gamma_s)  # ≈22-23
-    beta_0 = 0.0  # 初始 β
-    delta_beta = 0.1  # 每轮增量（可调）
-    beta_max = 1.0  # 最大 β
-
-    # 初始状态 x0 (假设你的 rho 向量)
-    x0 = CubieState.solved().vector  # 示例，替换成 state.to_rho()
-
-    # 方式 1: 离散退火（每 Tf 步增 β）
-    beta_k = beta_0
+def run_annealing(A_micro, x0, rho_f=5 / 9, delta_beta=0.1, beta_max=1.0, n_rounds=10, T_total=200):
+    """离散 + 连续退火模拟，返回 (norm_discrete, norm_continuous, Tf)"""
+    gamma_s = 1 - 7 / 9
+    Tf = int(np.log(1e-6) / -np.log(rho_f))
+    # 离散退火
+    beta_k = 0.0
     x = x0.copy()
     x_history_discrete = [x.copy()]
-    for k in range(10):  # 示例 10 轮
+    for k in range(n_rounds):
         for _ in range(Tf):
-            x = A_micro @ x  # 完整演化（模拟快层混合）
-        x *= (1 - beta_k)  # 收缩慢层（模拟退火）
+            x = A_micro @ x
+        x *= (1 - beta_k)
         beta_k += delta_beta
         x_history_discrete.append(x.copy())
-
-    # 方式 2: 连续退火 β(t) = beta_max * (t / T_total)
-    T_total = 200  # 总步数
+    # 连续退火
     x = x0.copy()
     x_history_continuous = [x.copy()]
     for t in range(1, T_total + 1):
         beta_t = beta_max * (t / T_total)
-        x = A_micro @ x * (1 - beta_t)  # 每步演化 + 退火
+        x = A_micro @ x * (1 - beta_t)
         x_history_continuous.append(x.copy())
-
-    # 误差评估（范数随时间变化）
     norm_discrete = [np.linalg.norm(xi) for xi in x_history_discrete]
     norm_continuous = [np.linalg.norm(xi) for xi in x_history_continuous]
-
-    # 画图
-    plt.figure(figsize=(12, 8))
-    plt.plot(np.arange(len(norm_discrete)) * Tf, norm_discrete, label='离散退火 (每 Tf 增 β)')
-    plt.plot(np.arange(len(norm_continuous)), norm_continuous, label='连续退火 β(t)')
-    plt.xlabel('步数 t')
-    plt.ylabel('状态范数 ||x_t||')
-    plt.title('分离时间尺度退火下的状态收敛')
-    plt.legend()
-    plt.grid(True)
-    # plt.savefig("data/分离时间尺度退火下的状态收敛.png", dpi=300, bbox_inches='tight')
-    plt.show()
-    """
-    通过分离时间尺度退火，我们在 Phase-1 子群的 228 维表示空间中实现了高效的动力学模拟。快层（谱半径 ≈5/9）在 Tf ≈24 步内充分混合，慢层（λ ≥ 2/3）在退火参数 β 的逐步收缩下快速趋向守恒子空间。连续退火曲线显示平滑收敛，离散退火则体现物理混合步骤。范数从初始值上升到峰值后迅速下降至稳定平台，证明快层截断与退火机制相容，且无误差放大效应。这为构建基于慢流形的可计算世界模型提供了可靠框架。
-    """
-
-    plt.figure(figsize=(12, 8))
-    for i in range(3):
-        plt.plot(T_steps, Z[:, i], label=f'slow dim {i}')  # 慢模式随时间的指数衰减
-    plt.xlabel('time step')
-    plt.ylabel('slow coordinates')
-    plt.title('Slow subspace evolution')
-    # plt.savefig("data/Slow subspace evolution.png", dpi=300, bbox_inches='tight')
-    plt.legend()
-    plt.show()
+    return norm_discrete, norm_continuous, Tf
 
 
-    idx = np.argsort(np.real(w))[::-1]
-    w = w[idx]
-    V = V[:, idx]
-    eps = 1e-6
-    dim_1 = np.sum(np.abs(w - 1) < eps)
-    print("dim_1:", dim_1)  # 24
-    gap = 1 - np.max(w[1:])
-    print("gap:", gap)  # 0.0
-    gap = 1 - np.max(np.real(w[dim_1:]))
-    print("gap2:", gap)  # 1−0.7777=0.2222
-
+def analyze_cubie_block_spectra(A_micro, eigvals_am, U_am, sizes=None):
+    """按 cp/ep/co/eo 分块分析 A_block 对角谱，返回 block_spectra 列表"""
+    if sizes is None:
+        sizes = [64, 144, 8, 12]
     A_block = U_am.T.conj() @ A_micro @ U_am
-    # A_block = U.T.conj() @ A_micro @ U
-    print("迹守恒？", np.isclose(np.trace(A_micro), np.trace(A_block), atol=1e-6))  # A_block 是严格对角的
-    diag_elements = np.diag(A_block).real
-    print("自变换对角 前10:", diag_elements[:10])
-    print("原 eigvals 前10:", eigvals_am[:10].real)
-
-    slow_dim = np.sum(np.abs(eigvals_am) > 0.95)
-    print(slow_dim)  # 24,存在一个 24 维子空间,立方体整体旋转的作用表示 ∣S4∣
-    print(np.sum(np.abs(np.abs(eigvals_am) - 7 / 9) < 1e-6))  # 44
-
-    # 2. 计算分段平均（假设你知道大致的分块位置，例如前24是慢的）
-    slow_block_diag = diag_elements[:24]
-    mid_block_diag = diag_elements[24:24 + 44]  # 44 个 ~7/9
-    mid2_block_diag = diag_elements[24 + 44:24 + 44 + 8]
-    fast_block_diag = diag_elements[24 + 44 + 8:]
-
-    print("慢层平均对角值:", np.mean(slow_block_diag))
-    print("慢层对角 std:", np.std(slow_block_diag))
-    print("亚慢层平均对角值:", np.mean(mid_block_diag))
-    print("中层平均对角值:", np.mean(mid2_block_diag))
-    print("快层平均对角值:", np.mean(fast_block_diag))
-
-    sizes = [64, 144, 8, 12]  # cp, ep, co, eo
     start = 0
     block_spectra = []
-
     for i, s in enumerate(sizes):
         if start + s > A_block.shape[0]:
-            print(f"警告：块 {i} 超出范围，截断到矩阵末尾")
             s = A_block.shape[0] - start
-
         block = A_block[start:start + s, start:start + s]
-
-        # 求特征值（因为是复矩阵，用 eigvals）
         eigvals = np.linalg.eigvals(block)
-
-        # 取实部（通常物理上关心实部，尤其是相似变换后应接近实谱）
         real_parts = np.real(eigvals)
         imag_parts = np.imag(eigvals)
-
-        # 统计：唯一值（四舍五入到一定精度）、最大/最小、平均等
         unique_real, counts = np.unique(np.round(real_parts, decimals=6), return_counts=True)
-
         print(f"\nBlock {i + 1}: size = {s}")
-        print(f"  特征值实部 (排序后): {np.sort(real_parts)[::-1][:10]} ...")  # 前10个最大的
+        print(f"  特征值实部 (排序后): {np.sort(real_parts)[::-1][:10]} ...")
         print(f"  唯一实部值 (round 6): {unique_real}")
         print(f"  计数: {counts}")
         print(f"  最大虚部幅度: {np.max(np.abs(imag_parts)):.2e}")
-        """Block 1 (64 维, cp)：
-        谱：连续分布，无大规模重根（不退化）。
-        含义：接近 irreducible 或高度泛化的表示。内部没有明显退化，表明这个置换子空间在 A_micro 作用下是“连续混合”的，没有强对称分离。
-        
-        Block 2 (144 维, ep)：
-        谱：类似 Block 1，连续分布，无大规模重根。
-        含义：同样接近 irreducible，代表棱置换的“generic” 行为。
-        
-        Block 3 (8 维, co)：
-        谱：λ = 2/3 (≈0.6667)，完全退化（multiplicity=8）。
-        含义：这是一个纯 8 维 irreducible 表示。在这个表示上，A_micro = (2/3) I，完全标量化。这符合 Schur 引理：生成元 S 在 V8 上是等效的“球平均”，暗示几何或对称结构（如 spherical averaging）。
-        
-        Block 4 (12 维, eo)：
-        谱：λ = 1 (multiplicity=4) + λ = 7/9 (≈0.7778, multiplicity=8)。
-        含义：reducible 表示 = 4 × trivial (λ=1) + 8 × irreducible (λ=7/9，完全退化)。这表明 12 维子空间被精确分解成两个部分，且 λ=7/9 在 8 维 irreps 上完全一致。
-        """
-
         block_spectra.append({
-            'size': s,
-            'max_imag': np.max(np.abs(imag_parts)),
-            'real_parts': real_parts,
-            'unique_real': unique_real,
-            'counts': counts
+            'size': s, 'max_imag': np.max(np.abs(imag_parts)),
+            'real_parts': real_parts, 'unique_real': unique_real, 'counts': counts,
         })
-
         start += s
-
-    # 全局对比：检查总谱是否一致
+    # 全局对比
     all_block_eigvals = np.concatenate([data['real_parts'] for data in block_spectra])
     print("\n全局检查:")
-    print("  块谱排序:", np.sort(all_block_eigvals.real)[::-1][:20])  # 与原 eigvals 对比
+    print("  块谱排序:", np.sort(all_block_eigvals.real)[::-1][:20])
     print("  原 A_micro 谱 (前20):", np.sort(np.abs(eigvals_am))[::-1][:20])
     print("  迹守恒？", np.isclose(np.trace(A_micro), np.trace(A_block), atol=1e-5))
-    # 构造投影算子
-    slow_idx = np.abs(eigvals_am - 1) < 1e-8
-    slow_basis = U_am[:, slow_idx]
-    P = slow_basis @ slow_basis.T.conj()
+    return block_spectra
 
-    # P = np.zeros((dim_R, dim_R))
-    # for R in rho_moves:
-    #     P += R
-    # P /= len(rho_moves)
-
-    T = 5
-    v = B
-    v /= np.linalg.norm(v)
-    v_slow = P @ v
-    v_fast = v - v_slow
-    norms = []
-
-    for t in range(T):
-        v = A_micro @ v
-        norms.append(np.linalg.norm(v))
-    print(norms)  # 时间演化 0.7^t 总 norm 演化
-
-    v_s = v_slow
-    v_f = v_fast
-    for t in range(T):  # 分别演化
-        v_s = A_micro @ v_s
-        v_f = A_micro @ v_f
-        print(np.linalg.norm(v_s), np.linalg.norm(v_f))  # 多谱结构
-
-    slow_in_block = U.T.conj() @ slow_basis
-
-    A = sum(c_i * mv_i.rho() for mv_i, c_i in zip(samples, np.random.randn(len(samples))))
-    B = sum(c_i * mv_i.rho() for mv_i, c_i in zip(samples, np.random.randn(len(samples))))
-    C = A + 1j * B
-    eigvals, U = np.linalg.eig(C)
-    # print(np.unique(np.round(eigvals, 6)))
-    blocks = detect_blocks(samples, U)
-    sizes = [len(b) for b in blocks]
-    print("Block sizes:", sorted(sizes))  # ....8、12、56、132，大块主要来自 permutation
-    print("Number of blocks:", len(blocks))  # 24
-
-    big_block = max(blocks, key=len)  # 选最大的块
-    print("big_block size:", len(big_block))  # 132
-    multiplicities = split_isotypic_block(samples, U, big_block, tol=1e-8)
-    print("Block multiplicities:", multiplicities)
-
-    projections = construct_projection_operators(U, blocks)
-    rho_matrices = [mv.rho() for mv in samples]
-
-    block_diag_rhos = []
-    for rho in rho_matrices:
-        blocks = [P @ rho @ P for P in projections]
-        block_diag_rhos.append(blocks)
-    # 检查 block_trace
-    for blocks in block_diag_rhos:
-        print([np.trace(b) for b in blocks])
+if __name__ == '__main__':
+    pass

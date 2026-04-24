@@ -16,12 +16,18 @@ rime/
 ├── cubieworld.py    # 慢动力学：Phase-1转移算符谱分析、慢流形、群谐函数
 ├── cubedraw.py      # 魔方可视化：Pygame 3D渲染与交互
 ├── cubedrawgl.py    # 魔方可视化：OpenGL 3D渲染
-├── cubeplot.py      # 数据可视化：训练曲线、角向低秩分析
+├── cubeplot.py      # 数据可视化：训练曲线、角向低秩分析、热图
 ├── cubelearn.py     # 学习模型：CubeEnv环境、RankingCritic、Phase15Critic
 ├── dice.py          # 骰子特征分析、游戏触发器规则
 ├── body.py          # 遗传进化：人类血型遗传、新颖性搜索算法
 ├── helpers.py       # 辅助工具：DBSCAN聚类、K-means、余弦相似度、softmax
 └── option.py        # 配置选项：全局参数管理
+
+test/
+├── test_cube.py          # 魔方贴纸级基础操作测试
+├── test_cubie.py        # 魔方块级基础操作测试
+├── test_cubieoperator.py # 群表示论实验（5个分组）
+└── test_circular.py     # 环形数据结构实验（11个分组）
 ```
 
 ## 主要模块
@@ -491,6 +497,15 @@ pip install -e .
 ```
 
 ## 快速开始
+
+### 运行测试
+
+```bash
+python test/test_cube.py
+python test/test_cubie.py
+python test/test_cubieoperator.py
+python test/test_circular.py
+```
 
 ### 魔方贴纸级操作
 

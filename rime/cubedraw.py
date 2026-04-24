@@ -1,6 +1,6 @@
 import numpy as np  # 导入 NumPy 库，用于数值计算和处理多维数组
 import pygame  # 导入 Pygame 库，用于游戏开发和图形界面设计
-import math
+import math, random
 from rime.cube import StickerCube, CubeBase
 from rime.cubie import CubieBase
 
@@ -122,6 +122,10 @@ class CubeDraw:
 class BaseCubeRenderer:
     WIDTH = 1000
     HEIGHT = 1000
+    # net positions for faces，标准魔方 net 坐标
+    FACE_OFFSET = {
+        'U': (1, 0), 'L': (0, 1), 'F': (1, 1), 'R': (2, 1), 'B': (3, 1), 'D': (1, 2)
+    }
 
     def __init__(self, cube: StickerCube, scale: float = None):
         self.cube = cube
@@ -230,12 +234,8 @@ class CubeRenderer(BaseCubeRenderer):
         """
         n = self.n
         sticker = int(max(size // (4 * n), 3))  # 一行有 4 个面（L F R B）
-        # net positions for faces，标准魔方 net 坐标
-        layout = {
-            'U': (1, 0), 'L': (0, 1), 'F': (1, 1), 'R': (2, 1), 'B': (3, 1), 'D': (1, 2)
-        }
         # self.colors = self.cube.color
-        for face, (cx, cy) in layout.items():
+        for face, (cx, cy) in self.FACE_OFFSET.items():
             fx = x + cx * sticker * n
             fy = y + cy * sticker * n
             for i in range(n):
@@ -488,7 +488,7 @@ class RubiksCubeDraw:
                     elif ev.key == pygame.K_SPACE:  # 暂停 / 恢复动画队列播放
                         self.paused = not self.paused
                     elif ev.key == pygame.K_p:  # 单次
-                        seq = self.cube.propose_move()
+                        seq = random.choice(self.cube.basic_generators())
                         pending_moves = [seq]
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_i:  # 回退上一次
@@ -499,8 +499,9 @@ class RubiksCubeDraw:
                         pending_moves = list(self.cube.generate_moves(25))
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_s:
+                        p0 = self.cube.normalize()
                         pending_moves = cubie.solve_sticker(self.cube.get_state())
-                        print(len(pending_moves))
+                        print(len(pending_moves), len(p0))
                         self.enqueue_moves(pending_moves)
                     elif ev.key == pygame.K_l:
                         print(self.cube.faces_colors)

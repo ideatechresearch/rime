@@ -1,9 +1,13 @@
 import numpy as np
-import random, math
+import random, os
 from collections import deque
-from rime.base import class_property, class_cache
-from rime.cubie import CubieState, CubieMove, CubieBase
-from rime.helpers import dbscan, fidelity, softmax, sigmoid, cosine_distance
+from rime.base import class_cache, timer, DATA_DIR
+from rime.cubie import CubieState, CubieMove, CubieBase, CubieExample
+from rime.helpers import dbscan, fidelity, softmax, sigmoid, normalize_p, normalize_z, cosine_distance, \
+    von_neumann_entropy
+import matplotlib.pyplot as plt
+
+N_GENERATORS = 18
 
 
 class SlowDynamics:
@@ -12,7 +16,24 @@ class SlowDynamics:
     群上的 diffusion map/Koopman operator/spectral representation learning
     核心本质：
     本类基于转移算符 A_micro = (1/|S|) ∑ ρ(s) 的谱分解，提取并利用慢子空间（λ ≥ 2/3，100 维）进行高精度动力学近似与低秩表示。
+    离散群在连续嵌入空间中的动力系统建模
     现象终结总结：角块扩散、棱块混沌
+
+    ================================
+    核心本质（Core Insight）
+    ================================
+    这是一个“三层混合系统”：
+
+        离散群结构（Group orbits）
+        + 连续低频嵌入（Slow manifold）
+        + 快速混合噪声（Fast modes）
+
+    表现为：
+
+        ✔ 远区：近似连续梯度系统
+        ✔ 中区：混合态（mixing regime）
+        ✔ 近区：退化为群轨道动力学（cycle / symmetry dominated）
+
     Rubik random walk = two-time-scale system, has a two-phase mixing structure
     | subsystem | mixing scale |
     | --------- | ------------ |
@@ -52,17 +73,88 @@ class SlowDynamics:
        - 慢子空间投影呈四重对称星形/十字结构（非 torus）
        - 中心密集核（低深度/solved），四臂向外扩散（高深度）
        - 反映立方对称残留 + 周期性朝向约束
+       - 同一个抽象群或结构，在不同维度下有不同的忠实表示 19 × 4 = 76,19 × 12 = 228
+       - 高维高斯外观 + 离散群轨道骨架 + 对称子流形
+       观测现象：
+        • 平均距离 ≈ 6.1（≈ √2 σ √d）
+        • 但分布是“壳层结构”：
+
+            0.0 / ~1.1 / ~3.6 / ~5.4 / ~6.1
+
+        → 来源：group word length 的离散投影
+    结论：
+        欧式距离在 mixing 后失去判别能力（measure concentration）
 
     6. 算法意义
        - 慢流形截断安全（快层快速衰减 + 无误差放大）
        - representation-aware heuristic d(x,y) = ||V_slow^T (x-y)|| 准等距（1.0059 ± 0.0871）
        - 可用于 A*/IDA* 搜索、生成慢距离 scramble、低秩模拟
+        • slow manifold truncation 是安全的
+        • dynamics 是低秩可控的
+        • 适合：
+            - heuristic search
+            - reduced simulation
+            - representation learning
+
+
+    7.  --------------------------------
+        动力学三阶段（Three Regimes）
+        --------------------------------
+
+        (1) Far Regime（远区）
+            • radial 主导
+            • potential 强
+            • move ranking 有效
+            • 类似连续梯度下降
+
+        (2) Mixing Regime（中区）
+            • radial 与 tangential 竞争
+            • anisotropy 上升
+            • 出现不稳定路径
+            • 距离开始失效
+
+        (3) Near-Target Regime（近区）【关键难点】
+            • radial → 0
+            • potential → 平坦
+            • tangential / rot 主导
+            • energy landscape collapse（能量退化）
+
+        慢流形 = “高斯外观的连续空间 + 强离散群轨道骨架 + 局部对称子流形”的混合动力系统
+        在动力学上仍保留强烈的群轨道结构 + 对称性约束 + 周期闭包
+        远区像连续梯度下降，近区退化为群的对称轨道动力学，容易被 2-cycle / involution / dir==2 等对称吸引子捕获。
+        • 远区：在高维球面上走“最短大圆路径”
+        • 近区：进入“环形轨道”，绕目标旋转
+
+        → 本质是：
+            连续优化 → 离散群轨道动力学 的相变
+
+    8. 空间几何层（Level 1）
+        • 统计外观：近似高维高斯球
+            ○ 平均距离稳定在 6.1~6.2（与 √2σ√d ≈ 6.16 高度吻合）
+            ○ 但本质不是连续高斯，而是“离散轨道在连续投影下的统计平滑”
+        • 壳层结构（Energy Shells）
+            ○ 距离呈现明显分层：0.0 / ~1.1 / ~3.6 / ~5.4 / ~6.1…
+            ○ 这是 group word-length quantization 在慢流形上的投影体现
+            每层对应不同的有效 orbit 复杂度
+
+        连续嵌入上的离散群动力系统
+
+        核心困难来自：
+
+            “对称性 + 投影信息丢失 + 轨道结构”
 
     使用方式：
         model = SlowDynamics(A_micro)
         z = model.project(state.to_rho())
         z_t = model.evolve(z, T)
         x_t = model.reconstruct(z_t)
+    9.发现的关键现象 / 困难
+
+    壳层结构：距离分层（0 / 1.1 / 3.6 / 5.4 / 6.1…），word-length quantization 效应。
+    2-cycle orbit：g ↔ g⁻¹ 反复打转（最顽固）。
+    dir==2 / Z轴对称陷阱：radial / rot 信号极弱，energy 平坦。
+    metric 主导：二次几何项压制 potential，导致近区退化。
+    近目标区退化：radial→0，potential 消失，搜索进入对称子流形。
 
     λ 层不是数值现象，而是代数定理
     18 个 generator 的谱
@@ -283,7 +375,7 @@ class SlowDynamics:
     Markov evolution.
     """
 
-    def __init__(self, n: int = 18, threshold: float = 2 / 3, tol=1e-6, eps=1e-6, rho_moves=None, k_slow=-1):
+    def __init__(self, n: int = N_GENERATORS, threshold: float = 2 / 3, tol=1e-6, eps=1e-6, rho_moves=None, k_slow=-1):
         """
         V = V_const ⊕ V_slow ⊕ V_fast
         A = A_corner ⊕ A_edge ⊕ A_scalar
@@ -323,17 +415,36 @@ class SlowDynamics:
         self.V_slow = self.V[:, mask_slow]  # 228 × 100 投影矩阵  舍弃128 维
         self.w_slow = self.w[mask_slow]  # 100
         self.dim_slow = len(self.w_slow)
+        self.scale_l2 = np.sqrt(2) * 0.5 * np.sqrt(self.dim_slow)  # 平均距离 参考尺度 6.14 6.162 (2.0 * np.pi),把每个坐标近似看成独立高斯分布
         self.V_keep = np.concatenate([self.V_const, self.V_slow], axis=1)
+
         # 预缓存慢空间表示,压缩算子,non-abelian group → 近似 abelian system
-        self.rho_slow = {k: self.V_slow.T @ rho @ self.V_slow  # 慢层压缩
-                         for k, (_, rho, *_) in self.rho_moves.items()}  # (100,100) 约化矩阵
-        M = np.stack([A.reshape(-1) for A in self.rho_slow.values()], axis=1)
+        self.rho_slow = {k: (mv, self.V_slow.T @ rho @ self.V_slow)  # 慢层压缩
+                         for k, (mv, rho, *_) in self.rho_moves.items()}  # (100,100) 约化矩阵
+
+        slow_moves = list(self.rho_slow.values())
+        self.U = np.stack([Ug for _, Ug in slow_moves])  # (n, d, d) Uz = U_tensor @ z
+        I = np.eye(self.V_slow.shape[1])
+        self.D = self.U - I  # (18, 76, 76) D_ops:Ug - I 代替：Ug @ z - z
+
+        self.C_pairs = {}  # C_gh matrix Lie algebra（线性近似）
+        self.commutators = {}  # Uc group commutator（非线性）
+        for i, (_, Ug) in enumerate(slow_moves):
+            for j in range(i + 1, len(slow_moves)):
+                _, Uh = slow_moves[j]
+                self.C_pairs[(i, j)] = Ug @ Uh - Uh @ Ug
+                self.commutators[(i, j)] = Ug @ Uh @ Ug.conj().T @ Uh.conj().T
+                # m = g @ h @ g.inverse() @ h.inverse()  # ghg⁻¹h⁻¹
+                # self.C_energy[(i,j)] = C_gh.T @ C_gh
+                # self.C_norm[(i, j)] = np.linalg.norm(C_gh, 'fro')
+
+        M = np.stack([Ug.reshape(-1) for _, Ug in slow_moves], axis=1)
         _, s, _ = np.linalg.svd(M, full_matrices=False)  # SVD 求秩
         self.dim_algebra_slow = np.sum(s > tol)
         # 验证迹守恒
         A_block = self.V.T.conj() @ self.A_micro @ self.V
         assert np.isclose(np.trace(self.A_micro), np.trace(A_block), atol=1e-6), "迹守恒验证失败：A_block 非对角或迹不等"
-        # 谱层统计
+        # 谱层统计dim_algebra_slow = np.sum
         unique_w, counts = np.unique(np.round(self.w, decimals=int(-np.log10(tol))), return_counts=True)  # 防数值误差
         """multi-head attention 权重:λ_i [1.0, 7 / 9, 2 / 3, 5 / 9, 1 / 3]"""
         projectors = []  # 构造 idempotents M_layers head
@@ -358,8 +469,8 @@ class SlowDynamics:
             self.Tf = int(np.ceil(t_mix))  # 混合时间步数
             print(f"Fast layer spectral radius: {self.rho_f:.6f},Estimated mixing time (ε=1e-6):  steps → Tf={self.Tf}")
 
-    @class_cache('PRIM_RHO_MOVES', key=lambda n=18: n)
-    def rho_moves(cls, n: int = 18) -> dict[tuple, tuple]:
+    @class_cache('PRIM_RHO_MOVES', key=lambda n=N_GENERATORS: n)
+    def rho_moves(cls, n: int = N_GENERATORS) -> dict[tuple, tuple]:
         """generators rho
         根据生成元规模 n 过滤并缓存 rho 表示字典
 
@@ -397,6 +508,19 @@ class SlowDynamics:
             g = g.compose(gen[idx])
         return g
 
+    def mutate(self, rho, length: int = 4, p=None):
+        """量子变异（commutator chain，保留结构）"""
+        gen = list(self.rho_slow.values())
+        indices = np.random.choice(len(gen), size=length, p=p)
+        U_chain = np.eye(rho.shape[0], dtype=complex)
+        g = CubieMove.identity()
+        for i in indices:
+            m, U = gen[i]
+            U_chain = U @ U_chain  # 左乘
+            g = g.compose(m)
+        rho2 = U_chain @ rho @ U_chain.conj().T
+        return rho2 / (np.trace(rho2) + 1e-12), g
+
     def projector(self, lam: float = 7 / 9):
         mask = np.abs(self.lambda_layers - lam) < self.tol
         idx = np.where(mask)[0][0]
@@ -417,8 +541,27 @@ class SlowDynamics:
         return self.V_slow.T @ x  # 返回 (100,) 慢坐标 z0
 
     def project_move(self, rho_m):
-        """慢空间表示,慢层压缩降维,投影变换"""
+        """慢空间表示,慢层压缩降维,投影变换,真实作用的投影作为参考
+        比直接用 已经投影过的 U 更忠实于群作用的原始几何
+        一个近似，无法完全忠实还原真实群作用在慢空间的效应
+        project(s.vector)用真实作用后再投影,物理上最忠实
+        """
         return self.V_slow.T @ rho_m @ self.V_slow  # (100,100) unitary/约化表示
+
+    @staticmethod
+    def relative_transform(z0: np.ndarray, z1: np.ndarray) -> np.ndarray:
+        """
+        计算慢空间中从 z0 到 z1 的最佳线性相对变换矩阵 M (z1 ≈ M @ z0)
+        返回 M (76×76 矩阵),只能是近似，不是群同态
+        """
+        z0 = np.asarray(z0, dtype=complex).reshape(-1, 1)  # 初始慢空间坐标
+        z1 = np.asarray(z1, dtype=complex).reshape(-1, 1)
+
+        # 最小二乘求解 M z0 ≈ z1
+        M = z1 @ np.linalg.pinv(z0)  # M = z1 @ z0⁺  (Moore-Penrose 伪逆)
+        # z_pred = M @ z0
+        # error = np.linalg.norm(z_pred.flatten() - z1)# 重建误差
+        return M
 
     def lift(self, z):
         """xT_approx 从慢坐标还原高维状态：x ≈ V_slow z"""
@@ -447,25 +590,44 @@ class SlowDynamics:
 
     def apply_move(self, key: tuple, z):
         """group_action key move 缓存"""
-        return self.rho_slow[key] @ z  # (100,)
+        _, rho_s = self.rho_slow[key]
+        return rho_s @ z  # (100,)
 
     @staticmethod
     def l2_distance(z0, z1):
+        """
+        L2 是 backbone
+        几何项只能 modulation
+        """
         return np.linalg.norm(z0 - z1)
 
     @staticmethod
-    def level(z0, z1):
-        """classify 分层能级结构,谱量子化的相空间，slow space 里存在离散轨道壳层,幅度量子化"""
+    def shell_level(z0, z1):
+        """classify 分层能级结构,谱量子化的相空间，slow space 里存在离散轨道壳层,幅度量子化
+        用 L2 距离对 slow manifold 做一个粗粒化分区
+        np.sqrt(2) * 0.5 * np.sqrt(self.dim_slow)
+        注意：
+            • 不是严格能级（非量子化）,壳层（shell index）
+            • 是 slow manifold 上的“壳层带（shell bands）”
+            • 本质来源：group word length 在连续嵌入中的模糊投影
+
+        Distance clusters correspond to projected group word-length:
+        ~0        : solved / near identity
+        ~1        : small perturbation
+        ~3–4      : intermediate
+        ~5–6      : mixing region
+        """
         d = SlowDynamics.l2_distance(z0, z1)
+        # cos_sim = 1 - cosine_distance(z0, z1)
         if d < 1.0:
             return 0, d
         elif d < 2.0:
             return 1, d
         elif d < 4.0:
             return 2, d
-        elif d < 6.0:
+        elif d < 6.0:  # self.scale_l2
             return 3, d
-        else:  # 高混沌
+        else:  # 高混沌 2*pi
             return 4, d
 
     def heuristic(self, x, y, norm_l2=True):
@@ -509,45 +671,399 @@ class SlowDynamics:
         ≈ 在一个高维球面上随机分布, 方向驱动的动力系统,距离 ≠ 差异,角度 = 差异
         """
         diffs = []
-        for U in random.sample(list(self.rho_slow.values()), samples):
+        for _, U in random.sample(list(self.rho_slow.values()), samples):
             za = U @ z0
             zb = U @ z1
-            diffs.append(cosine_distance(za - zb))
+            diffs.append(cosine_distance(za, zb))
+            # angle_diff = cosine_distance(z_gh, z_hg)
         return np.mean(diffs)
 
-    def lie_curvature(self, z, samples=6):
-        """单位扰动下产生的非交换程度,规范化曲率,几何性质≈ 群结构常数"""
-        curvs = []
-        gen = list(self.rho_slow.values())
-        for _ in range(samples):
-            Ug, Uh = random.sample(gen, 2)
-            z_gh = Ug @ (Uh @ z)
-            z_hg = Uh @ (Ug @ z)
+    def curvature_ij(self, i, j, z, lie=True):
+        """
+        几何不稳定性
+        分母过强,[Ug, Uh] 在 slow 空间被削弱,slow manifold 把李代数压平了
+        C @ z = Ug @ (Uh @ z) - Uh @ (Ug @ z)
+        D[i] @ z = Ug @ z - z
+        num = || [Ug, Uh] z || = || C_gh z ||
+        den = || (Ug - I) z || + || (Uh - I) z ||
+        """
+        if not lie:  # holonomy curvature
+            Uc = self.commutators[(i, j)] if i < j else self.commutators[(j, i)].conj().T
+            dz = Uc @ z - z  # 群交换子作用,几何塌缩
+            return np.linalg.norm(dz) / (np.linalg.norm(z) + 1e-8)
 
-            num = np.linalg.norm(z_gh - z_hg)  # ->局部“非交换结构矩阵”
-            den = (
-                    np.linalg.norm(Ug @ z - z) +
-                    np.linalg.norm(Uh @ z - z) + 1e-8
-            )
+        C = self.C_pairs[(i, j)] if i < j else -self.C_pairs[(j, i)]  # 反对称
 
-            curvs.append(num / den)
-        return np.mean(curvs)
+        num = np.linalg.norm(C @ z)  # 局部线性量“非交换结构矩阵”
+
+        di = self.D[i] @ z
+        dj = self.D[j] @ z
+
+        den = np.linalg.norm(di) + np.linalg.norm(dj) + 1e-8
+        return num / den
+
+    def lie_curvature(self, z, k: int = 6, sample=True) -> float:
+        """单位扰动下产生的非交换程度,规范化曲率,几何性质≈ 群结构常数
+        curvature(z) = ||[Ug,Uh]z|| / (||Ug z - z|| + ||Uh z - z||)
+        用随机抽样，否则全量统计会完全平滑掉局部信号 0.013
+        """
+        if sample:
+            idx = np.random.choice(len(self.rho_slow), size=(k, 2), replace=False)
+            curvs = [self.curvature_ij(i, j, z, True) for i, j in idx]
+        else:
+            Uz = np.einsum('nij,j->ni', self.U, z)  # (n,d)
+            dz = Uz - z
+            norm_dz = np.linalg.norm(dz, axis=1)
+            idx = np.argsort(norm_dz)[-k:]
+            # w = norm_dz[idx]
+            # w = w / (np.sum(w) + 1e-8)
+            curvs = [self.curvature_ij(i, j, z, True) for a, i in enumerate(idx)
+                     for b, j in enumerate(idx) if a < b]
+
+        return np.mean(curvs)  # np.percentile(curvatures, 75)
 
     def chaos_signature(self, z, samples=6):
         """
-        交换子带来的“幅度差”,非交换性的动力学 fingerprint, 通过随机选取两个 move 的交换子作用在 z 上，测量结果的差异来量化非交换性
+        动力扰动,交换子带来的“幅度差”,非交换性的动力学 fingerprint, 通过随机选取两个 move 的交换子作用在 z 上，测量结果的差异来量化非交换性
         测z 所在区域的“动力学弯曲程度”，局部李代数非交换性的离散采样估计||UgUh(z) - UhUg(z)||
+        chaos ≈ curvature
         """
+        n = len(self.rho_slow)
         sig = []
-        gen = list(self.rho_slow.values())
         for _ in range(samples):
-            Ug, Uh = random.sample(gen, 2)
-            z_gh = Ug @ (Uh @ z)
-            z_hg = Uh @ (Ug @ z)
-            l2_diff = np.linalg.norm(z_gh - z_hg)  # chaos 强度
-            # angle_diff = cosine_distance(z_gh, z_hg)
-            sig.append(l2_diff)  # 0.7 * angle_diff + 0.3 * l2_diff
-        return np.array(sig)
+            i, j = random.sample(range(n), 2)
+            if i < j:
+                C = self.C_pairs[(i, j)]
+            else:
+                C = -self.C_pairs[(j, i)]
+            l2_diff = np.linalg.norm(C @ z)  # chaos 强度: Ug @ (Uh @ z) - Uh @ (Ug @ z)
+            sig.append(l2_diff)
+        return np.array(sig)  # mean/std
+
+    def move_scores(self, z, target, preference=None, eps=3.0):
+        """
+        当状态已经很接近目标时，不同 move 对 z 的“推动方向”差异变得非常小,慢距离本身在接近目标时分辨率不足
+        接近目标时：mean_target_dist 0.397~0.483
+        max_chaos 0.397,max_chaos 0.860
+        边界退化,被推到一个混合平衡态,须引入微扰,人为注入不对称性,否则系统会卡在对称点
+        align → 近目标 → 自动衰减
+        target_dist → 近目标 → 梯度消失
+        sin_theta → 成主导（导致绕圈 / 平衡轨道）
+        梯度流 + 旋度流 拼特征
+
+        核心原则：
+            • target_dist = backbone（唯一稳定信号）
+            • radial / tangential = 正交分解
+            • near-target 强化 symmetry breaking
+
+        后续归一化（非常关键）
+        """
+        # 当前 z 的演化 z2 = U @ z
+        Uz = np.einsum('nij,j->ni', self.U, z)  # (n,d)
+        dz = Uz - z  # (n,d) 动力向量
+        tz = target - z
+        tz_norm = np.linalg.norm(tz)  # 当前到目标的总距离（标量） np.dot(tz, tz)
+        dz_norm = np.linalg.norm(dz, axis=1)  # (n_moves,) chaos 每个 move 的移动长度  np.sum(dz * dz, axis=1)
+
+        # 极坐标动力学分解
+        inner = np.real(np.einsum('ni,i->n', dz, tz))  # align dot dE 基础方向投影,朝目标方向的曲率,0.5-1.37
+        radial = inner / (tz_norm + 1e-8)  # = ||dz|| cosθ
+        cos_theta = inner / (dz_norm * tz_norm + 1e-8)  # cosθ alignment（吸引项） 归一化角度
+        sin_theta = np.sqrt(np.maximum(1.0 - cos_theta ** 2, 0.0))  # 旋转强度（切向分量） phase（旋转项）
+        tangential = dz_norm * sin_theta  # 适度鼓励旋转探索（避免死绕圈） np.linalg.norm(dz - proj, axis=1)
+        if tz_norm < eps:
+            radial *= 0.0
+            tangential = dz_norm  # 全部当作绕行
+
+        target_dist = np.linalg.norm(Uz - target, axis=1)  # 目标驱动 目标距离 势能吸引 energy
+        chaos = dz_norm
+
+        pref = np.zeros_like(chaos)
+        if preference is not None:
+            pref = np.real(np.einsum('ni,i->n', dz, preference))  # 生态位偏好偏置（打破对称性）对称性破缺
+
+        scores = np.stack([
+            target_dist,  # 0: global correctness（越小越好）
+            -radial,  # 1: 径向（越大越好）
+            tangential,  # 2: 切向（探索/绕）
+            chaos,  # 3: 扰动,动量,扩散 0.7-5.4
+            pref  # 4: 对称性破缺
+        ], axis=1)
+
+        # chaos = dz_norm / self.scale_l2
+        # alpha = 1.0 / (1.0 + np.exp(2.5 * (tz_norm - self.scale_l2/2)))
+        # energy = (
+        #         1.0 * delta_dist  # 局部势差
+        #         - 0.8 * cos_theta  # 主驱动 drift
+        #         - 0.35 * sin_theta * dz_norm  # 负号 切向扰动强度（鼓励结构探索）
+        #         + 0.2 * dz_norm ** 2  # 扩散（探索） diffusion
+        #     # + 0.15 * pref_bias  # 打破对称性
+        # )  # 加权 np.dot(raw_scores, w)
+        return scores
+
+    def move_energy(self, z, target, prev_dz=None):
+        """
+        几何能量函数：势能 + 几何修正（radial / tangential / curvature）
+        energy 函数尚未“大一统”——远区引导强，近区被 metric + 对称性压制，2-cycle 仍频繁出现。
+
+        E = <dz, ∇V> + <dz, G(z) dz>
+        （Fredholm / 紧算子视角）
+
+        ================================
+        1. 动力学分区（Three Regimes）
+        ================================
+
+        Far Regime（远区）
+            ||tz|| large
+            • radial 主导，potential 强
+            • move ranking 有意义（≈ L2 正确排序）
+            • energy 表现稳定
+
+        Mixing Regime（混合区）
+            • radial 与 tangential 竞争
+            • anisotropy 上升，curvature 开始起作用
+            • 欧式距离区分能力下降（进入 shell overlap）
+
+        Near-Target Regime（近目标区）【核心困难】
+            ||tz|| → small
+            • radial → 0
+            • potential → flat
+            • tangential / orbit motion 主导
+            • metric 容易压倒 potential
+            • move_scores 区分度崩塌
+            • 出现大量：
+                - 2-cycle（g ↔ g⁻¹）
+                - dir==2 对称陷阱
+                - orbit / cycle 行为
+            引入“破坏细致平衡”的项
+
+        ================================
+        2. 群对称性主导现象（Level-3）
+        ================================
+
+        • 2-cycle orbit（最稳定吸引子）
+            - g ↔ g⁻¹ 振荡
+            - move 分布集中在成对操作
+            - 原因：投影后 U ≈ U⁻¹（方向信息丢失）
+            manifestation:
+            - paired move dominance
+            - undo/redo loops
+
+        • dir==2 / 180° 对称陷阱
+            - radial ↓, tangential ↓, rot ≈ 0
+            - energy 在这些方向近似平坦
+            - 状态在对称子空间振荡（UD-like subspace）
+
+        • Involution-like behavior
+            - 多个 move 在 slow manifold 上近似互逆
+            - greedy 策略 → undo / redo 循环
+
+        • 对称子流形（Symmetric Submanifold）
+            - 局部近似 Abel（低交换子）
+            - 有效自由度降低
+            - 非交换结构被投影压平
+
+        ================================
+        3. Energy 失效模式（必须牢记）
+        ================================
+
+        • Metric 主导问题（最危险）
+            - quadratic（radial² + tangential²）过强
+            → 压制 potential
+            → 系统变成“少动优先”，而不是“朝目标走”
+
+        • 对称性区分失败
+            - dir==2 / Z-axis 区域：
+                radial / tangential / rot 同时变弱
+                所有几何量同时变小
+            → energy 无法区分 move
+
+        • 近区退化
+            - norm_tz → 0
+            → 所有信号衰减
+            → energy landscape flatten
+            在 near-target：
+                radial → 0
+                tangential → 弱
+                rot → 弱
+            → 所有动作分数接近
+
+        ================================
+        4. Ground Truth（强约束原则）
+        ================================
+
+        ||Uz - target||  （L2 distance）
+
+        全局排序最可靠（backbone）
+        在任何 regime 都不完全失效
+
+        原则：
+            L2 ranking is ground truth backbone
+            geometric terms only modulate, never dominate
+
+        ================================
+        5. 关键系统事实（防误判）
+        ================================
+
+        • dir==2 / 2-cycle ≠ bug
+            → 是群轨道（orbit phenomenon）
+
+        • 接近目标 ≠ 更容易
+            → 实际进入 isotropic + symmetry-dominated 区域
+
+        • 当前系统 ≠ 连续优化
+            → 本质是：
+                continuous embedding + discrete orbit dynamics
+
+        • move 行为：
+            → progress + orbit + involution 混合
+
+        ================================
+        6. 额外动力学补偿（经验）
+        ================================
+
+        • prev_dz（动量项）用于：
+            - 打破 2-cycle
+            - 提供时间方向（temporal asymmetry）
+
+        • 无 prev_dz 时：
+            → 极易进入 orbit / 绕圈
+
+        ================================
+        7. 一句话总结
+        ================================
+
+        魔方慢流形不是连续优化问题，
+        而是：
+            “离散群轨道 + 连续嵌入 + 对称性主导”的动力系统
+
+        本函数的作用：
+            提供一个“近似排序信号”，而不是精确物理能量
+
+
+        The system is governed by a global L2 potential, locally guided by geometric derivatives in the far regime, and stabilized by symmetry-breaking trajectory terms in the near-target regime, where continuous dynamics collapse into discrete group orbits.
+        """
+        Uz = np.einsum('nij,j->ni', self.U, z)  # (n,d)
+        dz = Uz - z  # (n,d)
+        tz = target - z
+        norm_dz = np.linalg.norm(dz, axis=1)  # np.sum(np.abs(dz)**2, axis=1)
+        norm_tz = np.linalg.norm(tz)
+
+        # --- 分解 dz ---
+        tz_unit = tz / (norm_tz + 1e-8)
+        radial = np.real(np.einsum('ni,i->n', np.conj(dz), tz_unit))  # 投影到径向方向
+        tangential = np.linalg.norm(dz - np.outer(radial, tz_unit), axis=1)  # 切向分量（垂直于径向）
+        #  全局 backbone：L2 距离（E_base）
+        E_base = np.linalg.norm(Uz - target, axis=1)  # distance L2 主干
+        # --- 势驱动 ---
+        inner = np.einsum('ni,i->n', np.conj(dz), tz)  # Hermitian 内积 <dz | tz>
+        E_potential = -np.real(inner)  # 朝目标移动，只在远区参与 energy 降低,线性泛函，类似 <dz, ∇V>
+        # --- rotation ---
+        rot = np.abs(np.imag(inner))  # 虚部 旋转（绕 target）
+
+        # --- 几何度规 metric ---
+        # best_align = np.argsort(potential)
+        # i1, i2 = best_align[0], best_align[1]
+        # # curvature = self.curvature_ij(i1, i2, z, lie=True)  # 0~0.12 方向驱动的曲率,路是否稳定,大:增加探索需求,纠结区域打破对称性
+        anisotropy = np.mean(tangential) / (np.mean(np.abs(radial)) + 1e-8)  # 策略各向异性 1.7,3.6,6
+        curvature = np.log1p(anisotropy)  # 探索相变变量 2.0 * np.tanh(anisotropy / 2.0) [0, 2]
+        # curvature = tangential / (radial + 1e-8)
+
+        # E_geom = 0.5 * radial ** 2 +  (1.0 + curvature) * tangential
+        E_geom = radial + tangential + curvature * rot  # 局部度规修正，鼓励 radial 和 tangential，特别是在高曲率区域（纠结区）增加旋转奖励，促进探索
+        # E_geom_norm = (
+        #     radial / (norm_tz + 1e-8)
+        #     + tangential / (norm_dz + 1e-8)
+        #     + curvature * rot / (norm_tz * norm_dz + 1e-8)
+        # )
+        # quadratic = 0.5 * radial ** 2 + (1.0 + curvature) * tangential ** 2  # 只在纠结区域加强成本,随 z 变化的正定紧自伴算子
+        # E_metric = quadratic / (norm_dz ** 2 + 1e-12)
+
+        # --- regime gating ---
+        # alpha = 1.0 / (1.0 + np.exp(-3.0 * (norm_tz - 2.0)))
+        alpha = np.clip(norm_tz / self.scale_l2, 0.0, 1.0)  # 远区≈1，近区≈0
+        # beta = np.clip(1.0 - norm_tz / 2.0, 0.0, 1.0) # 远区=0，近区=1
+        # energy = potential + metric
+        # 动态 gating（远区几何主导，近区 L2 主导）
+        E = (
+                E_base  # 主干（不调权重）L2 始终是 backbone
+                + (0.25 * alpha + 0.05) * E_geom  # 远区强，近区弱，远区几何权重高
+                + 0.15 * alpha * E_potential  # 只在远区提供方向，近区势能拉力
+        )
+
+        # + 0.03 * np.clip(E_metric - 1.0, 0.0, None)  # 超过各向同性才惩罚,惩罚项系数很小，避免主导
+        # + 0.05 * curvature * (rot + 0.5 * rot ** 2)
+
+        # print(E_target, radial, tangential)
+        # 时间箭头 + 对称惩罚 time arrow vdot(dz, prev_dz)
+        E_traj = 0.0
+        if prev_dz is not None:  # 鼓励同向，惩罚反向
+            # 计算当前候选 move 与上一步 move 的“相似度”（越相似越惩罚）
+            cos_traj = np.real(np.einsum('ni,i->n', np.conj(dz), prev_dz)) / (norm_dz * np.linalg.norm(prev_dz) + 1e-8)
+            E_traj = 1.0 - cos_traj
+            E += 0.25 * E_traj  # 防 2-cycle
+
+        # local_term =  0.3 * norm_dz**2 + 0.3 * tangential**2
+        # metric = alpha * metric + (1.0 - alpha) * local_term # 平滑混合
+
+        return E
+
+    # def move_energy(self, z, target, *args):
+    #     """
+    #     统一的几何能量函数：势能 + 径向成本 + 切向成本
+    #     几何能量函数：势能 + 径向成本 + 切向成本
+    #     E=⟨dz,G(z)dz⟩+⟨dz,∇V(z)⟩
+    #     E = <dz, ∇V> + <dz, G(z) dz> Fredholm / 紧算子
+    #     接近目标 → 各向同性
+    #     """
+    #     Uz = np.einsum('nij,j->ni', self.U, z)  # (n,d)
+    #     dz = Uz - z
+    #     tz = target - z
+    #
+    #     norm_dz = np.linalg.norm(dz, axis=1)
+    #     norm_tz = np.linalg.norm(tz)
+    #
+    #     # --- 分解 dz ---
+    #     tz_norm = tz / (norm_tz + 1e-8)
+    #     radial = np.einsum('ni,i->n', dz, tz_norm)  # 投影到径向方向
+    #     tangential = np.linalg.norm(dz - np.outer(radial, tz_norm), axis=1)  # 切向分量（垂直于径向）
+    #
+    #     # --- 势驱动 ---
+    #     potential = -np.einsum('ni,i->n', dz, tz)  # 朝目标移动energy 降低,线性泛函，类似 <dz, ∇V>
+    #
+    #     # --- 几何度规 metric ---
+    #     best_align = np.argsort(potential)
+    #     i1, i2 = best_align[0], best_align[1]
+    #     curvature = self.curvature_ij(i1, i2, z, lie=True)  # 0~0.12 方向驱动的曲率,路是否稳定,大:增加探索需求
+    #     metric = 0.5 * radial ** 2 + (1.0 + curvature) * tangential ** 2  # 只在纠结区域加强成本
+    #
+    #     # local_term =  0.3 * norm_dz**2 + 0.3 * tangential**2
+    #     # alpha = np.clip(norm_tz / np.pi, 0.0, 1.0)
+    #     # metric = alpha * metric + (1.0 - alpha) * local_term # 平滑混合
+    #
+    #     energy = potential + metric
+    #     return np.real(energy)
+
+    def move_energy_kg(self, z, target):
+        """
+        三阶稀疏张量（千亿级三元组） 谱投影 embedding
+        (state1, move, state2) 知识图谱嵌入空间
+        dz = U @ z - z
+        平移 + 旋转
+        """
+        Uz = np.einsum('nij,j->ni', self.U, z)  # 所有可能的下一状态
+        dz = Uz - z
+
+        # TransE-style 平移 + RotatE-style 旋转
+        translation_loss = np.linalg.norm(Uz - target, axis=1)  # 平移
+        rotation_loss = np.abs(np.imag(np.einsum('ni,i->n', dz, target - z)))  # 旋转分量（虚部）
+
+        energy = (
+                1.0 * translation_loss
+                + 0.5 * rotation_loss
+                + 0.2 * np.linalg.norm(dz, axis=1)  # chaos 捕捉非对称
+        )
+        return energy
 
     def bfs_slow(self, z_start, z_goal, max_depth=40):
         """
@@ -570,16 +1086,112 @@ class SlowDynamics:
 
             dist = self.l2_distance(z_curr, z_goal)
             if dist < 1e-4 or depth >= max_depth:
-                return depth, dist, path
+                return path, dist, depth
 
-            for k, rho_s in self.rho_slow.items():
+            for k in self.rho_slow.keys():
                 if len(path) > 0 and CubieMove.is_redundant(path[-1], k):
                     continue
                 z_next = self.apply_move(k, z_curr)
                 new_path = path + [k]
                 queue.append((z_next, depth + 1, new_path))
 
-        return max_depth, self.l2_distance(z_curr, z_goal), None
+        return None, self.l2_distance(z_curr, z_goal), max_depth
+
+    def greedy_search_slow(self, s_start: CubieState, s_goal: CubieState, max_depth=40, tau=0.1, min_dist=1.0):
+        """
+            两阶段搜索：
+            1. 用 energy greedy 快速逼近（dist < 1.0）
+            2. 逼近后切换到真实群作用精确搜索
+        """
+        state = s_start.clone()
+        path = []
+        z_goal = self.project(s_goal.vector)
+        moves = list(self.rho_slow.values())
+        prev_dz = None
+        for depth in range(max_depth):
+            z_curr = self.project(state.vector)
+            dist = self.l2_distance(z_curr, z_goal)
+
+            if dist < min_dist:
+                return path, dist, depth
+
+            energy = self.move_energy(z_curr, z_goal, prev_dz)
+            if random.random() < 0.15:  # 15% 的随机扰动概率不选最优，而是选前3个之一
+                top3 = np.argsort(energy)[:3]
+                top3_energy = energy[top3]
+                logits = -top3_energy / (tau + 1e-8)
+                logits -= np.max(logits)
+                pi = np.exp(logits)
+                pi /= pi.sum()
+                best_idx = np.random.choice(top3, p=pi)
+            else:  # 选 energy 最小的那个 move（top1）
+                best_idx = np.argmin(energy)
+
+            best_move, U = moves[best_idx]
+            state = best_move.act(state)
+            prev_dz = U @ z_curr - z_curr  # 形状 (dim,)
+            path.append(best_idx)
+
+        final_dist = self.l2_distance(self.project(state.vector), z_goal)
+        return path, final_dist, max_depth
+
+    def guided_search_slow(self, s_start: CubieState, s_goal: CubieState, max_depth=30, beam_width=3, min_dist=1e-3):
+        """
+        A* 风格搜索（贪心版 + beam search） 目标是 z_goal
+        使用慢坐标距离指导的贪心/束搜索
+        - moves: list of ρ(s) (27 个生成元)
+        - beam_width: 束宽度（限制探索分支）
+        # z_goal = model.project(CubieState.solved().vector)
+        # z_start = model.project(initial_state.vector)
+        """
+        from heapq import heappush, heappop
+        from itertools import count
+
+        # 优先队列：(距离, 深度, z_current, path)
+        pq = []
+        counter = count()
+        heappush(pq, (0.0, 0, next(counter), s_start, []))
+
+        visited = {}  # state -> best_depth
+        z_goal = self.project(s_goal.vector)
+        while pq:
+            f, depth, _, state, path = heappop(pq)
+            if depth > max_depth:  # 深度限制
+                continue
+            if state in visited and visited[state] <= depth:
+                continue
+            visited[state] = depth
+
+            z_curr = self.project(state.vector)
+            dist = self.l2_distance(z_curr, z_goal)
+            if dist < min_dist:  # 到达目标
+                return path, dist, depth
+
+            raw_scores = self.move_scores(z_curr, z_goal, eps=2.0)
+            if raw_scores[:, 2].sum() < 1e-6:
+                return path, dist, depth
+
+            scores_z = np.zeros_like(raw_scores)
+            for i in range(raw_scores.shape[1]):
+                scores_z[:, i] = (raw_scores[:, i] - raw_scores[:, i].mean()) / (raw_scores[:, i].std() + 1e-8)
+
+            w = [1.0, 0.4, 0.15, 0.1, 0.0]
+            scores = np.dot(scores_z, w)
+            # if depth % Tf == 0:
+            #     z_curr = self.evolve(z_curr, Tf)  # 模拟快层混合,随机采样几步完整演化
+            # 生成后继
+            successors = []
+            for i, (m, U) in enumerate(self.rho_slow.values()):
+                next_state = m.act(state)  # U @ z_curr
+                cost = scores[i]  # 主驱动：靠近目标
+                successors.append((cost, depth + 1, next(counter), next_state, path + [i]))
+
+            # 按距离排序，取 beam_width 个最好
+            successors.sort(key=lambda x: x[0])
+            for succ in successors[:beam_width]:
+                heappush(pq, succ)
+
+        return None, float('inf'), max_depth  # 未找到
 
     @staticmethod
     def ida_star_slow(model: 'SlowDynamics', start_state: CubieState, goal_state=None, depth_limit=20):
@@ -594,6 +1206,11 @@ class SlowDynamics:
 
         def dfs(z_curr, g, bound, path):
             h = model.l2_distance(z_curr, z_goal)
+            # z_next = self.project(next_state.vector)  
+            # dz = z_next - z_curr
+            # h = np.linalg.norm(z_next - z_goal) / model.scale_l2
+            # align = np.dot(dz, z_goal - z_curr).real / (np.linalg.norm(dz) * np.linalg.norm(z_goal - z_curr) + 1e-8)
+            # chaos = np.linalg.norm(dz) / model.scale_l2
             f = g + h
             if f > bound:
                 return f
@@ -621,413 +1238,6 @@ class SlowDynamics:
             if res == float('inf'):
                 return None, bound
             bound = res
-
-    @staticmethod
-    def guided_search_slow(model: 'SlowDynamics', z_start, z_goal, max_depth=50, beam_width=5):
-        """
-        A* 风格搜索（贪心版 + beam search） 目标是 z_goal
-        使用慢坐标距离指导的贪心/束搜索
-        - moves: list of ρ(s) (27 个生成元)
-        - beam_width: 束宽度（限制探索分支）
-        # z_goal = model.project(CubieState.solved().vector)
-        # z_start = model.project(initial_state.vector)
-        """
-        from heapq import heappush, heappop
-        # 优先队列：(距离, 深度, z_current, path)
-        pq = []
-        heappush(pq, (model.l2_distance(z_start, z_goal), 0, z_start.copy(), []))
-
-        visited = set()  # 防止重复 z（用 tuple(round(z,6))）
-
-        while pq:
-            dist, depth, z_curr, path = heappop(pq)
-            z_tuple = tuple(np.round(z_curr, 6))  # 离散化避免浮点重复
-            if z_tuple in visited:
-                continue
-            visited.add(z_tuple)
-
-            if dist < 1e-4 or depth >= max_depth:
-                return path, dist, depth  # 到达目标或深度限制
-
-            # if depth % Tf == 0:
-            #     z_curr = self.evolve(z_curr, Tf)  # 模拟快层混合,随机采样几步完整演化
-            # 生成后继
-            successors = []
-            for s_idx, (k, rho_s) in enumerate(model.rho_slow.items()):
-                z_next = model.apply_move(k, z_curr)
-                new_dist = model.l2_distance(z_next, z_goal)
-                new_path = path + [s_idx]
-                successors.append((new_dist, depth + 1, z_next, new_path))
-
-            # 按距离排序，取 beam_width 个最好
-            successors.sort(key=lambda x: x[0])
-            for succ in successors[:beam_width]:
-                heappush(pq, succ)
-
-        return None, float('inf'), max_depth  # 未找到
-
-
-class BalanceWorld:
-    def __init__(self, model: SlowDynamics = None, max_depth=40, balance_tol=10.0):
-        self.model = model or SlowDynamics(18)  # SlowDynamics instance
-        solved = CubieState.solved()
-        self.solved_rho = solved.vector
-        self.z_solved = self.model.project(self.solved_rho)
-        self.order_pan = deque([(solved, 0.0)])  # (state, e) 两个相空间
-        self.chaos_pan = deque([])
-        self.max_depth = max_depth
-        self.balance_tol = balance_tol
-        self.history = []  # Track pan weights over time
-
-    def slow_coord(self, state):
-        return self.model.project(state.vector)
-
-    def weight(self, state):
-        """混乱度：慢子空间到 solved 的距离"""
-        z = self.slow_coord(state)  # Slow distance as weight
-        return self.model.l2_distance(z, self.z_solved)
-
-    def energy(self, state):
-        z = self.slow_coord(state)
-        return np.linalg.norm(z - self.z_solved) ** 2
-
-    def chaos_density(self, state, samples=30):
-        """用交换子扰动，看世界长期演化
-        如果 [g,h] 几乎不改变 slow space
-        → 系统接近可交换 → 有序
-        如果 [g,h] 在 slow space 扰动很大
-        → 非交换强 → 混沌"""
-        total = 0
-        moves = list(CubieMove.prim_moves.values())
-        z = self.slow_coord(state)
-        for _ in range(samples):
-            g, h = random.sample(moves, 2)
-            m = g @ h @ g.inverse() @ h.inverse()
-            state2 = m.act(state)
-            z2 = self.slow_coord(state2)
-            effect = np.linalg.norm(z2 - z)  # log(ρ(g)) log(ρ(h)) - log(ρ(h)) log(ρ(g))
-            total += effect  # commutator_effect
-        return total / samples
-
-    def generate_state(self, target_weight):
-        depth = int(target_weight)  # Approximate depth for scramble
-        state = CubieBase.generate_cubie(length=min(depth, self.max_depth))
-        return state, self.energy(state)
-
-    def metropolis_step(self, state, temperature=1.0):
-        """
-        move 按 ΔE 概率接受
-        temperature 高 → 更随机
-        temperature 低 → 更趋向 solved
-        """
-        E0 = self.energy(state)
-
-        g = CubieBase.random_walk(length=1)
-        new_state = g.act(state)
-
-        E1 = self.energy(new_state)
-        dE = E1 - E0
-        # Metropolis rule
-        if dE < 0:
-            return new_state, E1
-        else:
-            if random.random() < math.exp(-dE / temperature):
-                return new_state, E1
-            else:
-                return state, E0
-
-    def observe(self):
-        """
-        低温 → order phase
-        高温 → chaos phase
-        """
-        order_w = [w for _, w in self.order_pan]
-        chaos_w = [w for _, w in self.chaos_pan]
-
-        obs = {
-            "order_mean": np.mean(order_w) if order_w else 0,
-            "chaos_mean": np.mean(chaos_w) if chaos_w else 0,
-            "order_var": np.var(order_w) if order_w else 0,
-            "chaos_var": np.var(chaos_w) if chaos_w else 0,
-            "order_size": len(self.order_pan),
-            "chaos_size": len(self.chaos_pan),
-        }
-
-        return obs
-
-    def balance(self, max_pan_energy=2000.0):
-        order_e = sum(w for _, w in self.order_pan)
-        chaos_e = sum(w for _, w in self.chaos_pan)
-        imbalance = order_e - chaos_e
-        # imbalance_ratio = abs(order_e - chaos_e) / (order_e + chaos_e + 1e-6)
-        target = abs(imbalance)
-
-        if order_e > max_pan_energy:  # 防止无限增长
-            self.order_pan = deque(sorted(self.order_pan, key=lambda x: x[1])[:len(self.order_pan) // 2])
-        if chaos_e > max_pan_energy:
-            self.chaos_pan = deque(sorted(self.chaos_pan, key=lambda x: x[1])[:len(self.chaos_pan) // 2])
-
-        if target > self.balance_tol:
-            if imbalance > 0:
-                # Add to chaos pan
-                state, e = self.generate_state(target)
-                self.chaos_pan.append((state, e))
-            else:
-                # Add to order pan (generate low-weight state)
-                state, e = self.generate_state(target / 2)  # Bias toward order
-                self.order_pan.append((state, e))
-
-            if chaos_e > order_e * 1.5:  # 当 chaos 过重时注入秩序
-                solved_like = CubieBase.generate_cubie(length=5)  # 接近 solved 的状态
-                self.order_pan.append((solved_like, self.energy(solved_like)))
-
-        self.history.append((order_e, chaos_e, self.observe()))
-
-    def evolve(self, steps=10, temperature=1.0):
-        for t in range(steps):
-            # if t % self.model.Tf == 0:
-            #     for agent in self.agents:
-            #         agent.fast_mix()  # 模拟个体噪声
-            # Evolve states on both pans
-            # current_temp = temperature * (1 + 2 * imbalance_ratio)
-            for pan in [self.order_pan, self.chaos_pan]:
-                new_pan = deque()
-                for state, old_e in pan:
-                    # Apply random move and reproject
-                    new_state, new_e = self.metropolis_step(state, temperature=temperature)
-                    # fluctuation = np.exp(-(new_e - old_e) / temperature) 涨落统计
-                    new_pan.append((new_state, new_e))
-                pan.clear()
-                pan.extend(new_pan)
-
-            self.balance()  # Rebalance after evolution
-
-    def anneal(self, steps=1000, T0=5.0, cooling_rate=0.999):
-        """
-        退火：温度从 T0 指数下降，每步演化 1 次
-        """
-        T = T0
-        traj = []
-        z0 = self.slow_coord(CubieState.solved())
-
-        for step in range(steps):
-            self.evolve(steps=1, temperature=T)
-            T *= cooling_rate
-
-            # 记录当前状态到 solved 的慢距离
-            current_state = self.order_pan[0][0]  # 以 order pan 的第一个状态为例
-            z = self.slow_coord(current_state)
-            traj.append(np.linalg.norm(z - z0))
-
-        return traj
-
-    def plot_history(self):
-        if not self.history:
-            return
-
-        order_e, chaos_e, obs = zip(*self.history)
-        steps = np.arange(len(self.history))
-
-        fig, axs = plt.subplots(2, 1, figsize=(12, 8))
-
-        # 上图：总能量
-        axs[0].plot(steps, order_e, label='Order Pan Total Energy (d²)', linewidth=2)
-        axs[0].plot(steps, chaos_e, label='Chaos Pan Total Energy (d²)', linewidth=2)
-        axs[0].set_xlabel('Evolution Steps')
-        axs[0].set_ylabel('Total Energy')
-        axs[0].set_title('Order vs Chaos Energy Evolution')
-        axs[0].legend()
-        axs[0].grid(True, alpha=0.3)
-
-        # 下图：平均能量
-        axs[1].plot(steps, [o['order_mean'] for o in obs], 'b--', label='Order Mean')
-        axs[1].plot(steps, [o['chaos_mean'] for o in obs], label='Chaos Mean')
-        axs[1].set_xlabel('Steps')
-        axs[1].set_ylabel('Mean Energy per State')
-        axs[1].legend()
-        axs[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig('data/Order vs Chaos Balance Evolution.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-    def plot_anneal_traj(self, traj):
-        plt.figure(figsize=(10, 5))
-        plt.plot(traj, label='Slow Distance to Solved', linewidth=2)
-        plt.xlabel('Annealing Step')
-        plt.ylabel('||z - z_solved||')
-        plt.title('Annealing Trajectory (T from 5.0 → ~0)')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.show()
-
-
-class RubikAgent:
-
-    def __init__(self, state, world: BalanceWorld):
-        self.state = state
-        self.world = world
-        # self.x = x  # 高维状态 228
-        self.z = world.slow_coord(state)  # slow coord 慢坐标
-        # self.belief= [w1, w2, ..., w12]
-        self.energy = world.energy(state)
-
-        self.age = 0
-        self.memory = deque(maxlen=10)
-        self.memory.append(state)  # 初始状态入记忆
-
-    def step(self, T):
-        new_state, new_e = self.world.metropolis_step(
-            self.state, temperature=T
-        )
-
-        self.memory.append(self.state)
-
-        self.state = new_state
-        self.energy = new_e
-        self.age += 1
-
-    def imitate(self, other_agent):
-        """
-        社会学习：从其他 agent 的记忆中随机模仿一个状态
-        """
-        if other_agent.memory:
-            teacher_state = random.choice(list(other_agent.memory))
-            self.state = teacher_state  # 直接模仿
-            self.energy = self.world.energy(self.state)
-            self.memory.append(self.state)  # 记录模仿结果
-
-    def reproduce(self):
-        """
-        繁殖：产生一个孩子，继承部分记忆 + 小变异
-        """
-        if self.energy < 2.0 and random.random() < 0.05:
-            child_state = self.state  # 孩子初始状态 = 父母状态
-
-            # 小变异（随机走 1–3 步）
-            if random.random() < 0.5:
-                steps = random.randint(1, 3)
-                g = CubieBase.random_walk(length=steps)
-                child_state = g.act(child_state)
-
-            # 继承父母记忆的一部分（前 5 个）
-            child = RubikAgent(child_state, self.world)
-            child.memory = deque(list(self.memory)[:5], maxlen=10)
-            child.memory.append(child_state)  # 当前状态入队
-
-            return child
-        return None
-
-
-class RubikLife(BalanceWorld):
-    """Artificial Life on Group Manifolds
-    群作用版：离散、非可交换、不会平均（不会塌成 I/d）、难做 planning / 概率 / 远期预测"""
-
-    def __init__(self, n_agents=20, **kwargs):
-
-        super().__init__(**kwargs)
-
-        self.agents = []
-
-        for _ in range(n_agents):
-            s = CubieBase.generate_cubie(length=random.randint(5, 20))
-            self.agents.append(RubikAgent(s, self))
-
-        self.population_history = []
-        self.record()
-
-    def record(self):
-        zs = [self.slow_coord(a.state) for a in self.agents]
-
-        if len(zs) == 0:
-            return
-
-        Z = np.stack(zs)
-
-        self.population_history.append(Z)
-
-    def step(self, T=1.0):
-
-        for agent in self.agents:
-            agent.step(T)
-
-        # 2. 交互（社会学习）
-        self.interaction()
-
-        # 3. 繁殖
-        self.reproduce()
-
-        # 4. 死亡
-        self.death()
-
-        # 5. 记录种群慢坐标
-        self.record()
-
-    def interaction(self):
-        """agent 之间交互：距离近则互相模仿"""
-        zs = [self.slow_coord(a.state) for a in self.agents]
-        for i, a in enumerate(self.agents):
-            for j, b in enumerate(self.agents):
-                if i >= j:
-                    continue
-                d = np.linalg.norm(zs[i] - zs[j])
-                if d < 5:  # 吸引簇：模仿
-                    if random.random() < 0.1:
-                        a.imitate(b)  # L_{a→b}
-                elif d > 15.0:  # 排斥：轻微扰动
-                    if random.random() < 0.05:
-                        g = CubieBase.random_walk(length=1)
-                        a.state = g.act(a.state)
-                        a.energy = self.energy(a.state)
-                else:
-                    # weak repulsion
-                    a.energy += 0.01
-                    b.energy += 0.01
-
-    def reproduce(self):
-        new_agents = []
-        for a in self.agents:
-            child = a.reproduce()
-            if child:
-                new_agents.append(child)
-        self.agents.extend(new_agents)
-
-    def death(self):
-        survivors = []
-        for a in self.agents:
-            if a.energy < 50 and a.age < 300:
-                survivors.append(a)
-        self.agents = survivors
-
-    def plot_population(self, n_last=50):
-        """可视化最近 n_last 代的种群在慢流形上的分布"""
-        if len(self.population_history) < n_last:
-            return
-
-        plt.figure(figsize=(12, 8))
-        recent = self.population_history[-n_last:]
-        for i, Z in enumerate(recent):
-            alpha = 0.1 + 0.9 * (i / (n_last - 1))  # 越新越亮
-            plt.scatter(Z[:, 0].real, Z[:, 1].real, s=10, alpha=alpha, c='blue',
-                        label=f'Gen -{n_last - i}' if i == 0 else None)
-
-        plt.xlabel('Slow PC1')
-        plt.ylabel('Slow PC2')
-        plt.title('Population Evolution on Slow Manifold (last 50 generations)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.show()
-
-    def plot_population_size(self):
-        sizes = [len(gen) for gen in self.population_history]
-        plt.figure(figsize=(10, 5))
-        plt.plot(sizes, 'b-', label='Population Size')
-        plt.xlabel('Generation')
-        plt.ylabel('Number of Agents')
-        plt.title('Population Dynamics')
-        plt.grid(True)
-        plt.legend()
-        plt.show()
 
 
 class QuantumAgent:
@@ -1057,6 +1267,17 @@ class QuantumAgent:
         w = w[w > 1e-12]  # np.abs(agent.z)**2
         return -np.sum(w * np.log(w)) if len(w) > 0 else 0.0
 
+    def rho_divergence(self, rho, mode: str = "trace"):
+        if mode == "relative":  # 相对纯度差异
+            return abs(np.real(np.trace(self.rho @ self.rho)) - np.real(np.trace(rho @ rho)))
+        elif mode == "trace":  # 迹距离（Hilbert-Schmidt） 核范数
+            return 0.5 * np.linalg.norm(self.rho - rho, ord='nuc')
+        elif mode == 'fro':  # Frobenius 范数距离（最常用、最稳定）
+            return np.linalg.norm(self.rho - rho, 'fro')
+
+        fid = fidelity(self.rho, rho)
+        return np.sqrt(2.0 - 2.0 * fid)  # Bures距离
+
     def expected_z(self):
         # 主方向（最大特征向量）
         w, V = np.linalg.eigh(self.rho)
@@ -1081,15 +1302,9 @@ class QuantumSimulation:
     密度矩阵版：连续、可微、必然均匀化（heat death）
     """
 
-    def __init__(self, model: SlowDynamics, commutators: list = None, n_agents=20):
+    def __init__(self, model: SlowDynamics, n_agents=20):
         self.model = model
-        self.moves = list(model.rho_slow.values())
-        self.commutators = commutators or []  # 216 commutator
-        if not self.commutators:
-            for i, Ug in enumerate(self.moves):
-                for j, Uh in enumerate(self.moves):
-                    Uc = Ug @ Uh @ Ug.conj().T @ Uh.conj().T
-                    self.commutators.append(Uc)
+        self.moves = [rho_s for _, rho_s in model.rho_slow.values()]
         self.agents = [
             QuantumAgent(CubieBase.generate_cubie(10), model)
             for _ in range(n_agents)
@@ -1097,22 +1312,20 @@ class QuantumSimulation:
 
         self.history = []  # 记录纯度、熵、交换子强度
 
-    def chaos_density(self, rho, samples: int = 20):
+    def chaos_density(self, rho, samples: int = 20, commutator=True):
         """用交换子 [U, ρ] 量化量子非对易性/相干性
         简化版 C(t) ≈ || UW^t UV UW^{-t} ρ UW^t UV† UW^{-t} - ρ ||
         """
         total = 0
         for _ in range(samples):
-            if self.commutators:
-                Uc = random.choice(self.commutators)  # commutator 链 216
-
+            if commutator:
+                Uc = random.choice(self.model.commutators.values())  # commutator 链 216
                 rho2 = Uc @ rho @ Uc.conj().T
                 total += np.linalg.norm(rho2 - rho, 'fro')  # || Uc ρ Uc† - ρ || 非交换性
             else:
-                Ug, Uh = random.sample(self.moves, 2)
-                rho_gh = Ug @ (Uh @ rho @ Uh.conj().T) @ Ug.conj().T
-                rho_hg = Uh @ (Ug @ rho @ Ug.conj().T) @ Uh.conj().T
-                total += np.linalg.norm(rho_gh - rho_hg)
+                C_gh = random.choice(self.model.C_pairs.values())
+                rho_diff = C_gh @ rho @ C_gh.conj().T
+                total += np.linalg.norm(rho_diff, 'fro')
 
         return total / samples
 
@@ -1163,7 +1376,7 @@ class QuantumSimulation:
         U_chain = np.eye(rho.shape[0], dtype=complex)
         for _ in range(random.randint(2, 4)):
             U = random.choice(self.moves)
-            U_chain = U @ U_chain @ U.conj().T
+            U_chain = U @ U_chain  # @ U.conj().T
         rho2 = U_chain @ rho @ U_chain.conj().T
         return rho2 / (np.trace(rho2) + 1e-12)
 
@@ -1318,43 +1531,58 @@ class Environment:
         self.targets_weight = [1.0] * len(self.targets)
 
         # --- move pairs ---
-        self.move_pairs = [
-            (mv, model.rho_slow[key])
-            for key, (mv, *_) in model.rho_moves.items()
-        ]  # 建立对齐
+        self.move_pairs = list(model.rho_slow.values())
 
         # --- 调度 ---
         self.scheduler = None
 
         self.context = {}
 
+        self.id_counter = 0  # ID计数器
+
     def add_target(self, z):
         self.targets.append(z)
+        self.targets_weight.append(1.0)
+        size = len(self.targets)
+        self.context["n_targets"] = size
+        return size - 1
 
-    def get_target(self, target_id=0):
-        if 0 <= target_id < len(self.targets):
-            return self.targets[target_id]
-        return None
+    def get_target(self, idx: int = 0):
+        if 0 <= idx < len(self.targets):
+            return self.targets[idx]
+        return self.z_solved
 
     def get_levels(self, z):
         """返回每个目标的距离"""
-        return [self.model.level(z, t) for t in self.targets]
+        return [self.model.shell_level(z, t) for t in self.targets]
 
-    def get_preference(self, z, target_id=0, eta=0.2):
+    def get_preference(self, z, target_id: int = 0, eta=0.2):
         """ 生态位"""
         # dirs = [t - z for t in self.targets]
         # weights = softmax(-[norm(d) for d in dirs])
         target_dir = self.targets[target_id] - z  # 指向目标的向量
         target_dir /= np.linalg.norm(target_dir) + 1e-8
-        noise = np.random.randn(len(z)) * 0.10
+        noise = np.random.randn(len(z))  # 个体噪声
         noise /= np.linalg.norm(noise) + 1e-8
-        preference = (1 - eta) * np.real(target_dir) + eta * noise
-        preference /= np.linalg.norm(preference) + 1e-8
-        return preference
+        pref = (1 - eta) * np.real(target_dir) + eta * noise
+        pref /= np.linalg.norm(pref) + 1e-8
+        return pref
 
-    def set_target_weight(self, idx, weight):
-        if 0 <= idx < len(self.targets):
-            self.targets_weight[idx] = weight
+    def update_context(self, **kwargs):
+        """环境上下文更新，可能影响 agent 的感知/决策"""
+        self.context.update(kwargs)
+
+    def adjust_weights(self, k: float = 2.0):
+        """k>=1,新元素权重是每个旧元素的 k 倍"""
+        n = len(self.targets)
+        if n == 0:
+            return
+        if n == 1:
+            self.targets_weight = [1.0]
+            return
+        w_old = 1.0 / (n - 1 + k)
+        w_new = k * w_old
+        self.targets_weight = [w_old] * (n - 1) + [w_new]
 
     def set_targets(self):
         """不要重新赋值"""
@@ -1367,7 +1595,8 @@ class Environment:
     def base_targets(self, type=0) -> list:
         if type == 1:
             return [self.model.project(s.vector) for s in
-                    (self.twisted_state(), self.inversed_state(), self.big_cycle_state())]
+                    (CubieExample.twisted(), CubieExample.inversed(), CubieExample.big_cycle(),
+                     CubieExample.checkerboard(), CubieExample.superflip())]
 
         targets = []
         s0 = CubieState.solved()
@@ -1378,26 +1607,6 @@ class Environment:
             targets.append(z)
         return targets
 
-    @staticmethod
-    def twisted_state():
-        co = np.arange(8, dtype=np.int8) % 3
-        co[-1] = (-np.sum(co[:-1])) % 3
-        eo = np.arange(12, dtype=np.int8) % 2
-        eo[-1] = (-np.sum(eo[:-1])) % 2
-        return CubieState.solved().with_(corners_ori=co, edges_ori=eo)
-
-    @staticmethod
-    def inversed_state():
-        cp = np.arange(8, dtype=np.int8)[::-1]
-        ep = np.arange(12, dtype=np.int8)[::-1]
-        return CubieState.solved().with_(corners_perm=cp, edges_perm=ep)
-
-    @staticmethod
-    def big_cycle_state():
-        cp = np.roll(np.arange(8, dtype=np.int8), 4)  # 4-cycle corners
-        ep = np.roll(np.arange(12, dtype=np.int8), 6)  # 6-cycle edges
-        return CubieState.solved().with_(corners_perm=cp, edges_perm=ep)
-
     def generate_far_target(self, threshold=7.0):
         while True:
             s = CubieBase.generate_cubie(length=15)
@@ -1405,7 +1614,7 @@ class Environment:
             if all(np.linalg.norm(z - z0) > threshold for z0 in self.targets):
                 return z
 
-    def generate_diff_target(self, threshold=0.3):
+    def generate_diff_target(self, threshold=0.4):
         """正交目标"""
         current_threshold = threshold
         attempt = 0
@@ -1415,7 +1624,7 @@ class Environment:
             max_dot = max(abs(np.dot(z, z0)) for z0 in self.targets)
             if max_dot < current_threshold:
                 return z
-            if attempt % 20 == 0:
+            if attempt % 10 == 0:
                 current_threshold += 0.01
             attempt += 1
 
@@ -1427,21 +1636,13 @@ class Environment:
         idx = np.argmax(np.linalg.norm(zs - center, axis=1))  # 找一个“最远点”
         return zs[idx]
 
-    def mutate(self, rho, length: int = 4):
-        """量子变异（commutator chain，保留结构）"""
-        U_chain = np.eye(rho.shape[0], dtype=complex)
-        g = CubieMove.identity()
-        for _ in range(length):
-            m, U = random.choice(self.move_pairs)
-            U_chain = U @ U_chain @ U.conj().T
-            g = g.compose(m)
-        rho2 = U_chain @ rho @ U_chain.conj().T
-        return rho2 / (np.trace(rho2) + 1e-12), g
-
 
 class HybridAgent:
     """
     双态系统,用量子态做观测 / 决策，用群作用做真实演化
+    多 agent 生态：resource 竞争 + 4 种互动（imitate / predator / reproduce / emulate）。
+    Phase 决策（Exploit / Revert / Explore / Natura）驱动行为。
+    目标：从离散群 + 慢流形中涌现集体智能、世界模型、记忆与时间箭头。
     | 层级 | 实现             |
     | -- | ------------------ |
     | 微观 | 群作用                |
@@ -1455,9 +1656,7 @@ class HybridAgent:
 
     # __slots__ = ('state', 'z', 'rho',  'pos')
 
-    def __init__(self, state: CubieState, env: Environment, rho_mutate=None):
-        # HybridAgent._init_shared(env.model,env.targets)
-
+    def __init__(self, state: CubieState, env: Environment, mutate_length=0):
         self.env = env
         self.model = env.model
         self.move_pairs = env.move_pairs
@@ -1470,117 +1669,203 @@ class HybridAgent:
 
         # 波函数（慢空间）用于几何
         self.z = env.model.project(state.vector)
+        self.prev_dz = None
 
-        z_hat = self.z / (np.linalg.norm(self.z) + 1e-8)  # z 的模长 = 物理信息（不能丢）,方向 = 认知信息（可以变）
-        self.rho_a = np.outer(z_hat, z_hat.conj())  # 纯态,不参与真实演化
-        self.rho_b = self.rho_a.copy()  # planning / imagination（不被观测污染）
+        z_hat = self.z / (np.linalg.norm(self.z) + 1e-8)  # 物理状态 z 的模长 = 物理信息（不能丢）,方向 = 认知信息（可以变）
+        self.rho = np.outer(z_hat, z_hat.conj())  # 纯态密度矩阵,感知层,不参与真实演化（观测更新），马尔可夫式的当下存在，自在的存在
+        if mutate_length > 0:  # 量子遗传（变异）
+            self.rho, g = self.model.mutate(self.rho, length=mutate_length)
 
+        self.rho_plan = self.rho.copy()  # future 快层 规划态/工作记忆 planning / imagination（不被观测污染），投向各种可能性，自为的存在
+        self.rho_mem = self.rho.copy()  # past 慢层 记忆场,长期记忆锚点,海马体长期记忆库,自我连续性，防止完全虚无化导致崩溃
+
+        self.chaos_val = self.chaos_density(mode='fast')  # z
+        self.curvature_val = self.model.lie_curvature(self.z)  # z,路径稳定性
+        self.move_entropy_val = 0.0
+
+        self.plan_entropy_val = von_neumann_entropy(self.rho_plan)  # plan_entropy，初始 0
+        self.purity_val = 1.0  # plan 规划态纯度
+        # 相对指标
+        self.fidelity_val = 1.0  # mem/plan 规划↔记忆锚点 相对相似度
+        self.consistency_val = 1.0  # a/mem，初始 1 vs 记忆 的连续性
+        self.divergence_val = 0.0  # a/plan，初始 0  规划态漂移 vs 信念相对差异
+
+        self.target_id = 0
+        self.level, dist = self.model.shell_level(self.z, env.get_target(self.target_id))
+        self.energy = dist ** 2
+
+        self.preference = env.get_preference(self.z, self.target_id)  # 生态位偏好向量
+        self.alignment = 1.0
+        self.energy_delta_cum = 0.0  # 总能量变化绝对值（经典运动量）
+        self.entropy_delta_cum = 0.0  # 总熵变化绝对值（持续活跃度）
+
+        self.confidence = 0.0
         # 生态特征
         self.age = 0
         self.resource = 1.0  # 资源（生存能力）
-        self.stats = {'phase': -1, 'T_prob': 0.0, 'T_phase': 0.0, 'move_probs_mean': 0.0, 'move_probs_std': 0.0}
-        self.level = -1
-        self.target_id = 0
-        self.preference = env.get_preference(self.z, self.target_id)  # 生态位偏好向量
-        self.alignment = 1.0
-        self.energy = self.get_energy()
-
-        self.chaos_val = self.chaos_density()
-        self.curvature_val = self.model.lie_curvature(self.z)
-
-        self.entropy_val = self.von_neumann_entropy(self.rho_b)  # plan_entropy，初始 0
-        self.purity_val = 1.0
-        self.fidelity_val = 1.0
-        self.divergence_val = 0.0
-        self.suitability = 0
-
+        self.stats = {'phase': -1, 'T': 0.0, 'T_phase': 0.0,
+                      'move_id': -1, 'move_probs_mean': 0.0, 'move_probs_std': 0.0,
+                      'diversity': 2.0 * np.pi}
         self.pos = np.random.randn(2) * 5  # 空间位置（局部交互）
         self.species_id = tuple(np.sign(self.z.real[:6]))  # 主特征向量签名,物种/基因/信仰/行为结构 cluster
 
         # self.move_probs = np.zeros(len(self.move_pairs))  # 当前动作概率分布
         self.phase_count = np.zeros(4, dtype=int)  # exploit/rollback/explore/mutate
         self.interact_count = np.zeros(6, dtype=int)
+        self.get_energy()
+        self.children: list['HybridAgent'] = []  # 子代对象列表
+        env.id_counter += 1
 
-    def quantum_evolve(self, k=3, alpha=1 / 9, gamma=1 / 3, temperature=1 / 3, neighbors=None):
+    def quantum_evolve(self, k=3, alpha=1 / 3, beta=1 / 9, temperature=1 / 3):
         """保持相干性,量子大脑轻微混合 局部混合 = 有方向的思考
         把 agent 的决策拆成 4 种相位（phase)
         探索-利用-修复-突变 四态系统
+        存在先于本质,虚无是自由的条件
+        beta 观测强度 β=1 → 现在的（强坍缩）β<1, beta 越高 → 塌缩越彻底（越不可逆）
         """
-        phase, p, idx = self.choose_phase(k=k, gamma=gamma, temperature=temperature, neighbors=neighbors)
+        self.divergence_val = 0.5 * np.linalg.norm(self.rho_plan - self.rho, ord='nuc')  # 0.4~1.2 规划空间的混乱程度与纯态信念的偏离程度
+        beta_eff = beta + 1.0 / 9 * (self.divergence_val - self.fidelity_val)
+        self.rho_plan = (1 - beta_eff) * self.rho_plan + beta_eff * self.rho  # 适度拉回当前现实观测
+        self.rho_plan /= np.trace(self.rho_plan)
+        old_entropy = self.plan_entropy_val
+        self.plan_entropy_val = von_neumann_entropy(self.rho_plan)  # 规划空间混乱度0~3 纯 rho_b: 0.05 /0.7 /1.5 /1.2
+        self.entropy_delta_cum += abs(self.plan_entropy_val - old_entropy)
+        self.purity_val = np.real(np.trace(self.rho_plan @ self.rho_plan))  # 0~1，越纯越好
+        self.fidelity_val = fidelity(self.rho_mem, self.rho_plan)  # 0~1,规划空间与当前记忆锚点的相似度,比 divergence 更稳定,但不敏感于纯度变化
 
+        phase, p, idx = self.choose_phase(k=k, temperature=temperature)
+
+        z_new = self.z.copy()
+        best_id = -1
         move_cost = 0
-        if phase == 0:  # 资源充足且适合 → 执行规划:A Exploit
+        if phase == 0:  # 锁位 资源充足且适合 → 执行规划,试图成为某种固定本质:A Exploit
             best_id = idx[-1]
-            g, best_U = self.move_pairs[best_id]
-            rho_next = best_U @ self.rho_a @ best_U.conj().T
-            move_cost = max(0.04, 0.21 - 0.07 * self.suitability)  # 范围约 0.03 ~ 0.18
+            g, U_opt = self.move_pairs[best_id]
+            z_new = U_opt @ self.z
+            rho_next = U_opt @ self.rho @ U_opt.conj().T
+            move_cost = max(0.04, 0.21 - 0.07 * self.confidence)  # 范围约 0.03 ~ 0.18
             # exploit 允许“认知跃迁”
         elif phase == 1:  # 资源充足但不适合 →回退rollback:AB Revert
             s_past = random.choice(list(self.memory))  # 回归点原修复，容许人犯错，仅限瞬息间
             g = CubieMove.build(self.state, s_past)
             z_past = self.model.project(s_past.vector)
+            z_past /= np.linalg.norm(z_past) + 1e-8
             rho_a = np.outer(z_past, z_past.conj())
-            U = model.project_move(g.rho())
-            rho_b = U @ self.rho_b @ U.conj().T
+            U = self.model.project_move(g.rho())
+            z_new = U @ self.z  # z_past
+            rho_b = U @ self.rho_plan @ U.conj().T
             rho_next = 0.5 * rho_a + 0.5 * rho_b  # 这功能有点逆天，打破真实与虚妄，虚实结合，现实 + 记忆 量子干涉
-            move_cost = max(0.05, 0.32 - 0.08 * self.suitability)
-        elif phase == 2:  # 更相信自身信念，采样、规划分离，用 p:B Explore
-            rho_next = np.zeros_like(self.rho_b, dtype=complex)
-            for i in idx:
-                _, U = self.move_pairs[i]
-                rho_next += p[i] * (U @ self.rho_b @ U.conj().T)
-            move_id = np.random.choice(len(self.move_pairs), p=p)  # 采样探索动作，得与上面k对上
-            g, U = self.move_pairs[move_id]
-            move_cost = max(0.03, 0.2 - 0.1 * self.suitability)
+            move_cost = max(0.05, 0.32 - 0.08 * self.confidence)
+        elif phase == 2:  # 更相信自身信念，采样+ 精细打分，大胆投向可能性（真实性）:B Explore
+            raw_scores = self.choose_scores(idx=idx)  # shape (18, 4)
+            top_component = raw_scores[idx]  # shape (k, 4)
+            top_component = (top_component - top_component.mean(axis=0)) / (top_component.std(axis=0) + 1e-6)
+            p_k = p[idx]
+            p_k /= p_k.sum()
+            w = np.array([0.4, 0.3, 0.2, 0.1])  # chaos,-purity, -divergence, mem_align
+            comp_score = np.tanh(np.dot(top_component, w))
+            move_scores = 1.0 / 3 * p_k + 2.0 / 3 * comp_score  # + top_p
+            # best_id = np.random.choice(idx, p=p_k)
+            best_id = idx[np.argmax(move_scores)]
+            g, U_opt = self.move_pairs[best_id]
+            z_new = U_opt @ self.z
+            zt = z_new.copy()
+            zt /= np.linalg.norm(zt) + 1e-8
+            rho_next = np.outer(zt, zt.conj())  # 纯态更新 U_opt @ self.rho_plan @ U_opt.conj().T
+            move_cost = max(0.04, 0.22 - 0.1 * self.confidence)
         else:  # 道法自然,多步演化 np.mean(p[idx]) < 1.0 / len(self.move_pairs) + np.std(p[idx]):
             zt = self.model.evolve(self.z, T=k)  # 先让当前认知在慢流形上演化一段时间，得到一个“预期位置”
             zt /= np.linalg.norm(zt) + 1e-8
-            rho_next = np.outer(zt, zt.conj())
-            rho_next, g = self.env.mutate(rho_next, length=random.randint(1, k))  # 探索性变异+random_walk
+            rho_a = np.outer(zt, zt.conj())
+            rho_next, g = self.model.mutate(rho_a, length=random.randint(2, k), p=p)  # 探索性变异+random_walk
+            U = self.model.project_move(g.rho())
+            z_new = U @ self.z
             # move_cost = -0.05 + 0.1 * random.random()
+
+        self.prev_dz = z_new - self.z
 
         self.phase_count[phase] += 1
         self.stats['phase'] = phase
+        self.stats['move_id'] = best_id
+        self.stats['move_cost'] = move_cost
         # 从 rho 出发 explore（少量混合） + 保留经典身份
-        alpha_eff = alpha + 1.0 / 9 * self.entropy_val  # 用规划熵控制激进程度,混乱时更激进规划
-        self.rho_b = (1 - alpha_eff) * self.rho_b + alpha_eff * rho_next  # self.rho_a
-        self.rho_b /= np.trace(self.rho_b)
+        # S_norm = self.plan_entropy_val / (np.log(self.rho_plan.shape[0]) + 1e-8)
+        alpha_eff = alpha + 1.0 / 9 * self.plan_entropy_val  # 用规划熵控制激进程度,混乱时更激进规划
+        # alpha_eff = np.clip(alpha_eff, 0.05, 0.5)
+        self.rho_plan = (1 - alpha_eff) * self.rho_plan + alpha_eff * rho_next
+        self.rho_plan /= np.trace(self.rho_plan)
 
-        # sig_loss = rho_sigreg(rho=self.rho_b, lambda_reg=0.09)
-        # self.rho_b = self.rho_b - sig_loss * (self.rho_b - 0.5 * np.eye(self.rho_b.shape[0]))
+        # sig_loss = rho_sigreg(rho=self.rho_plan, lambda_reg=0.09)
+        # self.rho_plan = self.rho_plan - sig_loss * (self.rho_plan - 0.5 * np.eye(self.rho_plan.shape[0]))
 
         return g, move_cost
 
-    def quantum_update(self, beta=5 / 9):
-        """从真实 state 更新“认知”,观测坍缩,移动后大脑同步
-        beta 观测强度
-        β=1 → 现在的（强坍缩）β<1,
-        beta 越高 → 塌缩越彻底（越不可逆）"""
-        self.z = self.model.project(self.state.vector)
-        z_hat = self.z / (np.linalg.norm(self.z) + 1e-8)
-        rho_obs = np.outer(z_hat, z_hat.conj())
-        beta_eff = beta + 1 / 9 * self.von_neumann_entropy(self.rho_a)  # 混乱时更依赖观测
-        self.rho_a = (1 - beta_eff) * self.rho_a + beta_eff * rho_obs  # rho 不再是纯态
-        self.rho_a /= np.trace(self.rho_a)  # 当前 belief（被观测修正）
-        # rho_mem = self.memory_field(limit=3)
-        self.purity_val = self.purity()
-        self.fidelity_val = fidelity(self.rho_a, self.rho_b)  # 0~1,规划空间与当前信念的相似度,比 divergence 更稳定,但不敏感于纯度变化
-        self.divergence_val = self.rho_divergence(
-            "trace")  # 0.5~1.2  0.8 relative:0.3,比entropy_val升的快,如果没有外部干扰，规划空间的混乱程度与当前信念的偏离程度相关
+    def quantum_update(self, g: CubieMove, samples: int = 10):
+        """从真实 state 更新“认知”,观测坍缩,同步认知"""
+        # 身体演化（离散、确定性） O(20) 操作（perm + ori） 严格群结构（真实世界）
+        self.state = g.act(self.state)
+        self.gm = self.gm.compose(g)
+        self.memory.append(self.state)
 
-    def memory_field(self, limit=5, decay_tau=4.0):
-        """从历史得到认知+ 时间衰减权重 + 从当前z反向演化出的虚拟记忆"""
+        self.z = self.model.project(self.state.vector)
+        self.chaos_val = self.chaos_density(samples=samples, mode='fast')  # 真实动力学的非交换性表现 'show'/'commutator'
+        self.curvature_val = self.model.lie_curvature(self.z, k=6)
+
+        z_hat = self.z / (np.linalg.norm(self.z) + 1e-8)
+        self.rho = np.outer(z_hat, z_hat.conj())  # rho_obs
+
+    def quantum_dream(self, step=5, gamma=1 / 3):
+        """
+        Dream 模式：使用 rho_mem 进行离线想象/模拟
+        不改变真实 state，只更新 rho_plan 和 rho_mem
+        混乱时更需要重组记忆
+        """
+        if self.age % step == 0:  # 长期记忆缓慢巩固
+            rho_mem_fresh = self.memory_field(limit=10, decay_tau=4.0, symmetry=True)  # 过去+未来的稳定结构
+            zt = self.env.targets[self.target_id]
+            zt /= np.linalg.norm(zt) + 1e-8
+            target_bias = np.outer(zt, zt.conj())  # 生成未来策略的源头
+            beta_eff = 1.0 / 9 * (1 - self.alignment)
+            rho_mem_fresh = (1 - beta_eff) * rho_mem_fresh + beta_eff * target_bias
+            self.rho_mem = (1 - gamma) * self.rho_mem + gamma * rho_mem_fresh
+        else:  # 轻微 EMA 更新（吸收当前 rho_a）
+            gamma_eff = gamma / step + 1.0 / 9 * von_neumann_entropy(self.rho_mem)  # 混乱时更依赖观测
+            self.rho_mem = (1 - gamma_eff) * self.rho_mem + gamma_eff * self.rho  # 当前 belief 用现实修正记忆
+
+        self.rho_mem /= np.trace(self.rho_mem)
+        self.consistency_val = np.real(np.trace(self.rho @ self.rho_mem.conj().T))  # 惯性,一致性,包含方向信息 0.22-0.7
+
+        if self.age > 1 and self.plan_entropy_val < 0.3 and self.purity_val > 0.90 and self.divergence_val < 0.2:
+            self.interact_count[4] += 1  # Boltzmann brain 状态持续,低熵涨落如何被第二定律摧毁 bb_lifetime
+        if self.plan_entropy_val > 2.0 and self.fidelity_val < 0.1 and self.consistency_val < 0.1:  # 认知崩溃检测，强锚定回当前信念,混乱时回忆过去的认知
+            self.rho_plan = 5.0 / 9 * self.rho + 1.0 / 3 * self.rho_mem + 1.0 / 9 * self.rho_plan
+            self.rho_plan /= np.trace(self.rho_plan)
+            print(f"[Crisis Anchor] entropy={self.plan_entropy_val:.3f} fidelity={self.fidelity_val:.3f} "
+                  f"div={self.divergence_val:.3f} purity={self.purity_val:.3f}")  # 虚假记忆如何快速被现实修正
+
+    def memory_field(self, limit=5, decay_tau=3.0, symmetry=False):
+        """
+        支持时间对称的长期记忆场, 从历史得到认知+ 时间衰减权重 + 从当前z反向演化出的虚拟记忆
+        海马体式，提供认知锚点
+        """
         if not self.memory:
-            return self.rho_a
+            return self.rho.copy()
         # 取过去几个状态
         past_states = list(self.memory)[-limit:]
-        rho_mem = np.zeros_like(self.rho_a, dtype=complex)
-        for i, s in enumerate(past_states):
-            weight = np.exp(-i / decay_tau) if decay_tau > 0 else 1.0
+        rho_mem = np.zeros_like(self.rho, dtype=complex)
+        for i, s in enumerate(reversed(past_states)):
             z_past = self.model.project(s.vector)
             z_past /= np.linalg.norm(z_past) + 1e-8
+            weight = np.exp(-i / decay_tau) if decay_tau > 0 else 1.0
             rho_mem += weight * np.outer(z_past, z_past.conj())
-        rho_mem /= np.trace(rho_mem)
+
+        if symmetry:  # 加入预测的“未来”记忆，使其近似时间平移不变:观察 bb_lifetime 是否显著增加
+            z_future = self.model.evolve(self.z, T=min(len(past_states), limit // 2))  # 用谱演化预测未来 T 步（对称于过去）
+            z_future /= np.linalg.norm(z_future) + 1e-8
+            rho_future = np.outer(z_future, z_future.conj())
+            rho_mem = 0.5 * rho_mem + 0.5 * rho_future  # 对称融合（过去和未来等权重）
+
+        rho_mem /= np.trace(rho_mem) + 1e-12
         return rho_mem
 
     def resource_field(self, pos):
@@ -1595,72 +1880,54 @@ class HybridAgent:
             field += 0.15 * np.exp(-np.linalg.norm(pos - peak) ** 2 / 12)
         return field
 
-    def get_energy(self):
+    def get_energy(self, step=10, momentum=0.2):
         """经典能量（slow distance²）"""
         dists = self.env.get_levels(self.z)
         best_target_id = np.argmin([d for _, d in dists])  # np.argsort(dists)[:k]
-        if self.age % 10 == 0 or self.level == -1:  # target 不要每步贪心切换
+        if self.age % step == 0 or self.level == -1 or self.target_id == -1:  # target 不要每步贪心切换
             self.target_id = best_target_id
-            self.preference = self.env.get_preference(self.z, self.target_id)
-        else:
-            if self.target_id == best_target_id:
-                self.resource += 0.2
-            elif self.resource > 0:
-                self.resource *= 0.98  # 不适应环境会慢慢死
+            eta_eff = 0.2 * (2 - self.consistency_val + self.chaos_val)
+            new_pref = self.env.get_preference(self.z, self.target_id, eta=eta_eff)
+            self.preference = (1.0 - momentum) * self.preference + momentum * new_pref
+            self.preference /= np.linalg.norm(self.preference) + 1e-8
 
         target_dir = self.env.targets[self.target_id] - self.z
         target_dir /= np.linalg.norm(target_dir) + 1e-8
-        self.alignment = np.dot(target_dir.real, self.preference)  # 0.3,0.7
+        self.alignment = np.dot(target_dir.real, self.preference)  # cos θ [-1, 1] 0.3,0.7
         self.level, dist = dists[self.target_id]
         if self.level <= 3.0:  # 靠近目标额外奖励
-            self.resource += 1.0 * (2 * np.pi - dist) / (2 * np.pi)
+            reward = 1.0 * (2 * np.pi - dist) / (2 * np.pi)
             if self.level == 0:
-                self.resource += 1.0  # 额外奖励 self.state == CubieState.solved()
-                print(f"Reached target {self.target_id} at age {self.age} with resource {self.resource:.2f}")
+                reward += 1.0  # 额外奖励 self.state == CubieState.solved()
+                self.interact_count[5] += 1
+                print(
+                    f"Reached target {self.target_id} at age {self.age} with resource {self.resource:.2f},stats: {self.stats}")
+                self.target_id = np.argmax([d for _, d in dists])
+            self.resource += reward
+
+        old_energy = self.energy
         self.energy = dist ** 2
-        self.resource += 0.1 * (1 / (1 + self.energy))
+        self.energy_delta_cum += abs(self.energy - old_energy)
+        self.resource += 0.1 * (1.0 / (1.0 + self.energy))
         return self.energy
 
-    def purity(self, rho=None):
-        if rho is None:
-            rho = self.rho_a
-        return np.real(np.trace(rho @ rho))  # 0~1，越纯越好
-
-    def von_neumann_entropy(self, rho=None):
-        """
-        S = -Tr(ρ ln ρ) 冯纽曼熵 在纯态下取值为零,
-        rho_b:规划空间的混乱程度，越高说明想象力越丰富、决策越不确定
-        """
-        if rho is None:
-            rho = self.rho_b
-        w = np.linalg.eigvalsh(rho)
-        w = w[w > 1e-12]
-        return -np.sum(w * np.log(w)) if len(w) > 0 else 0.0
-
-    def rho_divergence(self, mode: str = "trace"):
-        if mode == "relative":  # 相对纯度差异
-            return abs(self.purity(self.rho_a) - self.purity(self.rho_b))
-        elif mode == "trace":  # 迹距离（Hilbert-Schmidt） 核范数
-            return 0.5 * np.linalg.norm(self.rho_a - self.rho_b, ord='nuc')
-        elif mode == 'fro':  # Frobenius 范数距离（最常用、最稳定）
-            return np.linalg.norm(self.rho_a - self.rho_b, 'fro')
-
-        fid = fidelity(self.rho_a, self.rho_b)
-        return np.sqrt(2.0 - 2.0 * fid)  # Bures距离
-
-    def chaos_density(self, samples=10, mode='slow'):
+    def chaos_density(self, samples=10, mode='fast'):
         """对易性观测量:表示层非对易性/真实动力学扰动"""
+        if mode == 'fast':  # slow
+            sigs = self.model.chaos_signature(self.z, samples)
+            return sigs.mean()
+
         total = 0.0
         for _ in range(samples):
             (g, Ug), (h, Uh) = random.sample(self.move_pairs, 2)
-            if mode == 'quantum':
-                rho_gh = Ug @ (Uh @ self.rho_a @ Uh.conj().T) @ Ug.conj().T
-                rho_hg = Uh @ (Ug @ self.rho_a @ Ug.conj().T) @ Uh.conj().T
+            if mode == 'quantum':  # rho_diff ≈ C_gh @ rho @ C_gh.conj().T
+                rho_gh = Ug @ (Uh @ self.rho @ Uh.conj().T) @ Ug.conj().T
+                rho_hg = Uh @ (Ug @ self.rho @ Ug.conj().T) @ Uh.conj().T
                 total += np.linalg.norm(rho_gh - rho_hg, 'fro')  # 0.07-0.4
             elif mode == 'show':  # 非交换性在慢空间的表现，完全在慢流形上,非对易性被压平了
                 z_gh = Ug @ (Uh @ self.z)  # g 后 h
                 z_hg = Uh @ (Ug @ self.z)  # h 后 g
-                total += np.linalg.norm(z_gh - z_hg)  # 0.1-0.35 chaos_signature
+                total += np.linalg.norm(z_gh - z_hg)  # 0.1-0.35 chaos_signature np.linalg.norm(C_gh @ z)
             else:  # Rubik group 本来就是强非交换群,chaos 太强 → 系统发散 or 震荡
                 s_gh = (g @ h).act(self.state)  # g.act(h.act(self.state))
                 s_hg = (h @ g).act(self.state)
@@ -1671,130 +1938,132 @@ class HybridAgent:
         if mode == 'quantum' or mode == 'show':
             return total / samples
 
-        scale = np.linalg.norm(self.z) + 1e-8
-        return (total / samples) / scale
+        z_norm = np.linalg.norm(self.z) + 1e-8
+        return (total / samples) / z_norm
 
-    def choose_probs(self, target=None, neighbors=None):
+    def choose_scores(self, idx=None):
         """
+        只对这 k 个动作做精细的 4 维 component score 计算，节省计算量
         倾向：高纯度（秩序）+ 适度混沌（非交换性）
+        对指定的 idx（top-k）计算 4 维 component score，其余保持 
+        move_scores → p → idx = top-k
         """
-        if target is None:
-            target = self.env.get_target(self.target_id)
+        if idx is None:
+            idx = range(len(self.move_pairs))
 
-        scores = np.zeros((len(self.move_pairs), 6), dtype=np.float64)
-        for i, (mv, U) in enumerate(self.move_pairs):
-            z2 = U @ self.z  # 当前 z 的演化
-            rho2 = U @ self.rho_a @ U.conj().T  # 慢空间密度矩阵,当前信念量子演化
-            purity_gain = self.purity(rho2) - self.purity_val  # 自然系统里不是：变得更纯
-            chaos = np.linalg.norm(rho2 - self.rho_a, 'fro')  # 非对易倾向
-            divergence = 0.5 * np.linalg.norm(rho2 - self.rho_b, ord='nuc')  # rho2 与规划态的匹配度
-            target_dist = np.linalg.norm(z2 - target)  # 目标驱动  self.z
-            # target_angle=cosine_distance(z2, target)  # 目标对齐角度,比距离更稳定
-            align = np.dot(z2 - self.z, target - self.z).real  # 朝目标方向的曲率,方向投影,0.5-1.37
-            diversity = 0.0  # 多样性
-            if neighbors is not None and len(neighbors) > 0:
-                diversity = np.mean([np.linalg.norm(z2 - n.z) for n in neighbors])
+        # rho_next = np.zeros_like(self.rho_plan, dtype=complex)
+        scores = np.zeros((len(self.move_pairs), 4), dtype=np.float64)
+        for i in idx:
+            _, U = self.move_pairs[i]
+            sim_rho_real = U @ self.rho @ U.conj().T
+            chaos = np.linalg.norm(sim_rho_real - self.rho, 'fro')  # 非对易倾向 0.2-1.3
+            purity_gain = np.real(np.trace(sim_rho_real @ sim_rho_real)) - self.purity_val  # 自然系统里不是：变得更纯
+            divergence = 0.5 * np.linalg.norm(sim_rho_real - self.rho_plan, ord='nuc') - self.divergence_val  # 与规划态的匹配度
+            mem_align = np.linalg.norm(sim_rho_real - self.rho_mem, 'fro')  # 保持轨道连续性 -self.consistency_val
+            # sim_rho_plan = U @ self.rho_plan @ U.conj().T
+            # plan_consistency = np.real(np.trace(sim_rho_plan @ self.rho_plan))
 
-            scores[i, 0] = -purity_gain  # 稳定性
-            scores[i, 1] = chaos  # 探索性
-            scores[i, 2] = -divergence  # 规划匹配度
-            scores[i, 3] = align  # 方向驱动
-            scores[i, 4] = -target_dist / (2 * np.pi)  # 目标距离
-            scores[i, 5] = -diversity / (2 * np.pi)  # 多样性,多样性惩罚
+            scores[i, 0] = chaos  # 探索性
+            scores[i, 1] = -purity_gain  # 稳定性,适度混合,纯度太高:探索性丢失
+            scores[i, 2] = -divergence  # 规划匹配度 np.real(np.trace(sim_rho @ self.rho_plan))
+            scores[i, 3] = -mem_align  # 记忆连续性
+            # rho_next += p[i] * sim_rho
 
         return scores
 
-    def choose_phase(self, k=3, gamma=1 / 3, temperature=1 / 9, neighbors=None):
-        """phase 选择逻辑：整合所有变量，输出 phase,用 4 个 phase 的分数决定行为模式"""
-        self.entropy_val = self.von_neumann_entropy(self.rho_b)  # 规划空间混乱度0~3 纯 rho_b: 0.05 /0.7 /1.5 /1.2
-        if self.age > 0 and self.entropy_val < 0.3 and self.purity_val > 0.90:
-            self.interact_count[4] += 1  # Boltzmann brain 状态持续,低熵涨落如何被第二定律摧毁 bb_lifetime
-        if self.entropy_val > 2.2 and self.fidelity_val < 0.1 and self.divergence_val > 0.9:  # 认知崩溃检测，强锚定回当前信念,混乱时回忆过去的认知
-            self.rho_b = (1 - gamma) * self.rho_a + gamma * self.rho_b
-            self.rho_b /= np.trace(self.rho_b)
-            print(self.entropy_val, self.fidelity_val, self.divergence_val, self.rho_divergence("relative"))
-            self.entropy_val = self.von_neumann_entropy(self.rho_b)
-            self.fidelity_val = fidelity(self.rho_a, self.rho_b)
-            self.interact_count[5] += 1  # 认知崩溃次数,虚假记忆如何快速被现实修正
+    def choose_phase(self, k=3, temperature=1 / 9):
+        """phase 选择逻辑：整合所有变量，输出 phase,用 4 个 phase 的分数决定行为模式
+        焦虑是自由的证明:phase 切换"""
+        target = self.env.get_target(self.target_id)
+        energy = self.model.move_energy(self.z, target, self.prev_dz)
+        fitness = - energy  # 越高越好
+        f = normalize_z(fitness)
+        p0 = softmax(f)  # softmax 太平滑 → 导致平均,无T
+        self.move_entropy_val = -np.sum(p0 * np.log(p0 + 1e-8))
+        entropy = self.move_entropy_val / np.log(len(p0))
+        scale = np.percentile(np.abs(fitness), 80) + 1e-6
+        # scores = np.clip(fitness,-15, 15)  # 限制范围，避免溢出
+        T = temperature * (1 + 3.0 * self.curvature_val) + 2.0 * self.chaos_val  # 动作层,越高越随机
+        # p = np.exp(-scores / T)  # 量子决策 math.exp(-dE / temperature)
+        f = fitness / (T * scale + 1e-8)
+        f = f - np.max(f)
+        p = np.exp(f)
+        p /= p.sum() + 1e-12
 
-        raw_scores = self.choose_probs(neighbors=neighbors)
-        best_align = np.argsort(raw_scores[:, 3])
-        (_, Ug), (_, Uh) = self.move_pairs[best_align[-1]], self.move_pairs[best_align[-2]]
-        num = np.linalg.norm(Ug @ (Uh @ self.z) - Uh @ (Ug @ self.z))
-        den = (
-                np.linalg.norm(Ug @ self.z - self.z) +
-                np.linalg.norm(Uh @ self.z - self.z) + 1e-8
-        )
-        self.curvature_val = num / den  # 0~0.12 方向驱动的曲率,路是否稳定,大:增加探索需求
-
-        T = temperature + 2.0 * self.chaos_val * (1.0 + self.curvature_val)
-        + 1.0 / 3 * (1.0 - self.purity_val)
-        + 1.0 / 3 * (1.0 - self.fidelity_val)  # 动作层,越高越随机
-        # T = temperature + 0.8 * self.chaos_val +0.5 * self.entropy_val
-        w = np.array([0.4, 0.3, 0.3, 0.3, 0.2, 0.2])  # purity, chaos, divergence, target, ... 的权重
-        # w /= w.sum()
-        scores = np.clip(np.dot(raw_scores, w), -10, 10)  # 加权,限制范围，避免溢出
-        p = np.exp(-scores / T)  # 量子决策 math.exp(-dE / temperature)
-        p /= p.sum() + 1e-12  # softmax(-np.array(scores) / T) 太平滑 → 导致平均化
         idx = np.argsort(p)[-k:]
         best_id = idx[-1]
+        p_max = p[best_id] / p[idx].sum()  # 在候选中的相对优势
 
-        # current_entropy = self.von_neumann_entropy(self.rho_a)
-        cv = np.std(p[idx]) / (np.mean(p[idx]) + 1e-8)  # 0.05-0.2 概率分布集中度
-        self.suitability = p[best_id] + min(1.0, cv)
-        + (1.0 / 9 - self.curvature_val)
-        + 1.0 / 9 * (2.0 - self.entropy_val)  # 执行阈值,(1.2 - divergence_val)
-        # print(f"Suitability: {suitability:.3f} (p={p[best_idx]:.3f}, purity={self.purity_val:.3f}, plan_entropy={plan_entropy:.3f})")
-        exploit_score = self.suitability + 0.5 * self.purity_val + 1.0 / 3 * self.fidelity_val  # A,suitability > 0.6,purity_val > 2 / 3
-        revert_score = (1.0 / 3 - self.suitability) * self.fidelity_val * self.resource  # AB,认知崩了才回退,suitability < 0.2
-        explore_score = self.entropy_val * (1.0 + self.chaos_val) + self.curvature_val  # B,entropy_val > 2 / 3
-        natura_score = (2.0 / 3 * (2.0 - self.purity_val - self.fidelity_val)
-                        + 1.0 / 3 * self.alignment + 0.3 * max(0.0, 0.5 - cv))
+        sharpness = np.sum(p ** 2)  # Gini-like ,1/n,1
+        suitability = p_max + 2.0 / 3 * sharpness + 1.0 / 3 * (1.0 - entropy)  # 执行阈值
+        instability = self.chaos_val * (1 + 2.0 * self.curvature_val) + 1.0 / 3 * entropy
+        # print(f"Suitability: {suitability:.3f} /{instability:.3f} (p={p[best_id]:.3f}, purity={self.purity_val:.3f}, plan_entropy={self.plan_entropy_val:.3f},"
+        #       f"entropy={entropy:.3f},sharpness={sharpness:.3f},p_max={p_max:.3f}")
 
-        phase_scores = np.array(
-            [exploit_score, revert_score, explore_score, natura_score])  # reward_phase - cost_phase,phase_vector
+        suitability = np.clip(suitability, 0.0, 1.0)
+        instability = np.clip(instability, 0.0, 1.0)
+        self.confidence = (1.0 - instability + suitability) / 2.0
 
-        T_phase = temperature + 1.0 / 3 * self.chaos_val + 2.0 / 3 * self.entropy_val  # 策略层
-        x_scores = np.clip(phase_scores / T_phase, -10, 10)
+        phase_scores = np.array([
+            suitability + 1.0 / 3 * (1.0 - self.divergence_val + self.fidelity_val + self.purity_val),
+            # exploit: 高信心 + 高规划可靠
+            (1.0 - suitability) + self.consistency_val * self.resource / np.sqrt(self.age + 1),
+            # revert:  低信心 + 规划失效,认知崩了才回退
+            instability + self.divergence_val + 1.0 / 9 * self.plan_entropy_val,  # (1.0 - self.consistency_val)
+            # explore: 高混乱 + 高曲率
+            self.consistency_val * (1.0 - abs(self.purity_val - 0.5) - abs(self.fidelity_val - 0.5)) +
+            self.alignment * (1 + 2.0 * self.curvature_val)
+            # natura:  中性、保守，结构沉淀阶段，鞅偏差
+        ])  # phase_vector
+
+        # conflict_exploit = np.clip((self.plan_entropy_val - 0.8) / 0.8, 0.0, 1.0)
+        # conflict_explore = np.clip((0.5 - self.fidelity_val) / 0.5, 0.0, 1.0)
+
+        # phase_scores[0] *= (1.0 - 0.6 * conflict_exploit)
+        # phase_scores[0] -= 0.2 * conflict_explore
+        # phase_scores[2] *= (1.0 + 0.5 * conflict_explore)
+        # phase_scores[2] += 0.3 * conflict_exploit
+        ps = normalize_z(phase_scores)
+        ps = np.tanh(ps)
+        T_phase = temperature * (1 + 1.0 / 3 * self.chaos_val)  # 策略层
+        x_scores = ps / (T_phase + 1e-6)
         phase_p = softmax(x_scores)  # 限制范围，避免溢出, 提高数值稳定性
 
         try:
             phase = np.random.choice(4, p=phase_p)  # 会抖,or last_phase
         except ValueError:
-            phase = np.argmax(phase_p)  # 如果概率分布有问题，选择概率最高的阶段
+            phase = np.argmax(phase_p) or self.stats['phase']  # 如果概率分布有问题，选择概率最高的阶段
             # if np.any(np.isnan(phase_p)) or np.sum(phase_p) == 0:
             print(
-                f"Phase scores: {phase_scores},scores:{scores} Phase probabilities: {phase_p}, T_phase: {T_phase:.3f}")
-            print("any inf in raw_scores?", np.isinf(raw_scores).any())
-            print("raw_scores range:", raw_scores.min(), raw_scores.max())
+                f"Phase scores: {phase_scores},scores:{fitness} Phase probabilities: {phase_p}, T_phase: {T_phase:.3f}")
 
-        self.stats['T_prob'] = T
+            print("energy range:", energy.min(), energy.max())
+
+        self.stats['T'] = T
         self.stats['T_phase'] = T_phase
         self.stats['move_probs_mean'] = p.mean()
-        self.stats['move_probs_std'] = p.std()
+        self.stats['move_probs_std'] = p.std()  # 0.05
+        self.stats['suitability'] = suitability
+        self.stats['instability'] = instability
+        # self.stats['move_cv']  = np.real(np.std(energy) / (np.mean(energy) + 1e-8))  #  概率分布集中度
 
-        return phase, p, idx
+        return int(phase), p, idx
 
-    def step(self, T=1 / 9, L: int = 1, neighbors=None):
+    def step(self, T=1 / 9, L: int = 1, S: int = 10, neighbors=None):
         """核心双态步进：量子决策 → 经典执行 → 大脑更新 量子大脑混合"""
         for _ in range(L):
-            self.chaos_val = self.chaos_density(mode='show')  # 真实动力学的非交换性表现 'show'/'commutator'
             # 量子大脑轻微演化 未来模拟,融合同步记忆 k = int(3 + 6 * self.entropy())
-            g, move_cost = self.quantum_evolve(k=3, alpha=1 / 9, gamma=1 / 3, temperature=T, neighbors=neighbors)
+            g, move_cost = self.quantum_evolve(k=3, alpha=1 / 3, beta=1 / 9, temperature=T)
             if move_cost > 0:
                 self.resource -= move_cost
                 # print(f"Agent executes move {self.move_id} with cost {move_cost:.3f} and suitability {p[best_idx]:.3f}")
+            # 观测更新
+            self.quantum_update(g)
 
-            # 身体演化（离散、确定性） O(20) 操作（perm + ori） 严格群结构（真实世界）
-            self.state = g.act(self.state)
-            self.gm = self.gm.compose(g)
+        # 弱坍缩,现实校正
+        self.quantum_dream(step=5, gamma=1 / 3)
 
-            # 观测更新（弱坍缩,现实校正）
-            self.quantum_update(beta=5 / 9)
-
-            self.memory.append(self.state)
-
-        self.get_energy()
+        self.get_energy(step=S)
         # 资源动态
         self.gather_resource(neighbors)
         self.age += 1
@@ -1805,11 +2074,9 @@ class HybridAgent:
         self.pos += 0.8 * np.array([grad_x, grad_y])
 
     def emulate(self, g: CubieMove):
-        self.state = g.act(self.state)
-        self.gm = self.gm.compose(g)
-        self.quantum_update()  # 同步认知
+        self.quantum_update(g)  # 同步认知
         self.get_energy()
-        self.memory.append(self.state)
+        self.interact_count[3] += 1
 
     def imitate(self, other_agent: 'HybridAgent', data: dict = None):
         """
@@ -1821,43 +2088,42 @@ class HybridAgent:
         if self.purity_val > other_agent.purity_val:
             return
         relative_strength = self.purity_val * self.fidelity_val - other_agent.purity_val * other_agent.fidelity_val
-        if abs(relative_strength) < 0.2:  # 实力相近不学（避免过度模仿导致系统崩溃）
+        if abs(relative_strength) < 0.1:  # 实力相近不学（避免过度模仿导致系统崩溃）
             return
 
-        slow_d = data.get("slow_d", np.linalg.norm(self.z - other_agent.z))
         directed_d = data.get("directed_d", np.dot(other_agent.z - self.z, self.preference).real)  # 沿自身偏好方向投影
-        if slow_d < 1.0 or directed_d < 0.1:
+        if directed_d < 0.1:  # 方向性判断
             return  # 太近不模仿（防止塌缩,抹平结构）collapse,只有当对方在自己偏好方向上更接近目标时才模仿
 
-        cultural_d = np.linalg.norm(self.rho_b - other_agent.rho_b, 'fro')  # 规划认知差异
-        if cultural_d > 1.5:  # 规划认知差异过大不模仿（防止认知冲突）
+        cultural_d = np.linalg.norm(self.rho_plan - other_agent.rho_plan, 'fro')  # 规划认知差异
+        if cultural_d > 1.0:  # 规划认知差异过大不模仿（防止认知冲突）
             return
-        score = (0.5 * sigmoid(directed_d) +
-                 0.3 * (1 - slow_d / 3.0) +
-                 0.2 * (1 - cultural_d / 2.0))
-        trigger_prob = np.clip(score, 0, 1)
+        score = 0.5 * sigmoid(directed_d) + 0.4 * (1 - cultural_d / 2.0) + 0.1 * self.resource
+        trigger_prob = np.clip(score, 0.05, 1.0)
+        if random.random() > trigger_prob:
+            return
+
+        # comm = np.linalg.norm(self.rho_mem @ other_agent.rho_mem - other_agent.rho_mem@ self.rho_mem)
+        # if comm < 0.2:
+        #     return
+
         # 模仿对方的规划认知或者参考对方的记忆场
-        if random.random() < trigger_prob:  # 轻微同步经典状态
-            teacher = random.choice(list(other_agent.memory))
-            g = CubieMove.build(self.state, teacher)  # 带着求经问道之心
-            U = self.model.project_move(g.rho())
-            teacher_rho = U @ self.rho_b @ U.conj().T
-            # self.emulate(g)
-        elif self.divergence_val > 0.9 and self.resource > 3:  # 当自己的规划和现实差异过大时，更倾向于参考对方的记忆场（更稳定）
-            teacher_rho = other_agent.memory_field(limit=4)
+        if self.divergence_val > 0.8 and self.resource > 3:  # 当自己的规划和现实差异过大时，更倾向于参考对方的记忆场（更稳定）
+            teacher_rho = other_agent.rho_mem.copy()
             transfer = min(0.5, 0.1 * self.resource)  # 法不轻传
             self.resource -= transfer
             other_agent.resource += transfer
         else:
-            teacher_rho = other_agent.rho_b
+            teacher_rho = other_agent.rho_plan.copy()
 
         # 融合对方的规划认知，只学习对自己有用的部分
-        delta = teacher_rho - self.rho_b
+        mix_ratio = 1 / 9 * min(1.0, directed_d * self.resource * self.plan_entropy_val)
+        delta = teacher_rho - self.rho_plan
         align = np.real(np.trace(delta @ np.outer(self.preference, self.preference)))
-        mix_ratio = 1 / 9 * min(1.0, directed_d * self.resource * self.entropy_val)
-        self.rho_b += mix_ratio * align * delta  # 记忆融合，文化吸收
-        self.rho_b /= np.trace(self.rho_b)  # 暂时不影响 rho_a
-        self.divergence_val = self.rho_divergence("trace")
+
+        self.rho_plan += mix_ratio * align * delta  # 记忆融合，文化吸收
+        self.rho_plan /= np.trace(self.rho_plan)  # 暂时不影响 rho_a
+
         self.interact_count[0] += 1  # 模仿计数
 
     def predator(self, other_agent: 'HybridAgent', data: dict = None):
@@ -1865,54 +2131,135 @@ class HybridAgent:
         捕食：改变 state 和 资源+ 领地推进
         predator = phase 扰动
         """
-        comm = np.linalg.norm(self.rho_a @ other_agent.rho_a - other_agent.rho_a @ self.rho_a)
-        if comm < 0.2:
-            return
-
         relative_strength = self.purity_val * self.resource - other_agent.purity_val * other_agent.resource
         if abs(relative_strength) < 0.3:  # 实力相近不打（避免过度竞争导致系统崩溃）
             return
+
         # 强者判定
         if relative_strength > 0:
             predator, prey = self, other_agent
         else:
             predator, prey = other_agent, self
+            return  # 单向,只让 stronger 调用 weaker
 
-        pos_d = data.get("pos_d", np.linalg.norm(predator.pos - prey.pos))
-
+        pos_d = data.get("pos_d", np.linalg.norm(self.pos - other_agent.pos))
+        local_avg = 0.5 * (self.resource + other_agent.resource)
+        relative_strength /= (local_avg + 1e-6)
         transfer = max(0, 0.1 * prey.resource * sigmoid(relative_strength))
         predator.resource += 0.95 * transfer
         prey.resource -= transfer
 
-        prob = np.exp(-pos_d ** 2 / 4.0)
+        prob = np.exp(-pos_d ** 2 / 5.0) * self.plan_entropy_val
         # 量子捕食（位置近才触发）
-        if self is predator and random.random() < prob:  # 边界扰动,捕食成功后，弱者可能发生认知变异（逃避/适应）
+        if random.random() < prob:  # 边界扰动,捕食成功后，弱者可能发生认知变异（逃避/适应）
             g = self.model.random_walk(length=2)
             prey.emulate(g)
-            self.interact_count[3] += 1
 
-        if self is prey:
-            direction = predator.pos - prey.pos
-            prey.pos -= 0.3 * direction / (pos_d + 1e-6)
-        if self is predator:
-            self.interact_count[1] += 1  # 捕食计数
+        direction = predator.pos - prey.pos
+        prey.pos -= 0.3 * direction / (pos_d + 1e-6)
 
-    def interact(self, neighbors, values: list):
-        """只负责和给定的邻居列表交互（慢空间模仿 + 量子捕食）"""
-        if not neighbors:
-            return
-        for b, d in zip(neighbors, values):
-            if self is b: continue
-            directed_d = np.dot(b.z - self.z, self.preference).real  # 沿自身偏好方向投影
-            d['directed_d'] = directed_d
-            if self.species_id == b.species_id:  # 同族：学习
-                # 慢空间吸引/排斥
-                if random.random() < 0.2:
-                    self.imitate(b, data=d)
-            else:  # 异族：竞争 / 战争
-                prob = np.exp(-0.2 * len(neighbors))  # 越拥挤越不打
-                if random.random() < prob:
-                    self.predator(b, data=d)
+        self.interact_count[1] += 1  # 捕食计数
+
+    def interact_kernel(self, agents, values: list, D=0.03, S=0.08, T=0.2, R=0.1):
+        """
+        连续场近似：kernel-based PDE update
+        统一加权更新，状态转移
+        diffusion（模仿） + selection（竞争） + transport（捕食） + entropy（抗塌缩）
+        """
+
+        rho_i = self.rho_plan
+        x_i = self.z
+
+        # local_diversity = np.mean([np.linalg.norm(self.z - n.z) for n in neighbors])
+
+        diffusion_term = np.zeros_like(rho_i, dtype=complex)
+        transport_term = np.zeros_like(x_i)
+
+        entropy = self.plan_entropy_val
+        curvature_i = self.curvature_val
+        r_i = self.resource
+        f_i = self.purity_val * max(1e-6, r_i)
+        selection_term = 0.0
+        fitness_accum = 0.0
+        resource_flow = 0.0
+        weight_sum = 1e-8
+
+        for b in agents:
+            if b is self:
+                continue
+
+            rho_j = b.rho_plan
+            x_j = b.z
+            # --- 1️⃣ kernel ---
+            dist = np.linalg.norm(x_i - x_j)
+            if dist > 2 * np.pi:  # 距离过远直接跳过
+                continue
+            same_species = (self.species_id == b.species_id)
+            same_target = (self.target_id == b.target_id)
+            species_gate = 0.2 + 0.8 * (1.0 if same_species else 0.0)
+            target_gate = 0.5 + 0.5 * (1.0 if same_target else 0.0)
+
+            dir_align = np.dot(x_j - x_i, self.preference).real  # imitate的核心
+            # --- kernel ---
+            K = np.exp(-dist ** 2 / 2.0)
+            K *= species_gate
+            K *= target_gate
+
+            learn_gate = sigmoid(dir_align) * (1 - entropy)  # imitate
+            cultural_d = np.linalg.norm(rho_i - rho_j, 'fro')
+            cultural_gate = np.exp(-cultural_d)
+
+            # --- predator gating（predator_prob）---
+            f_j = b.purity_val * max(1e-6, b.resource)
+            strength_diff = (f_j - f_i) / (abs(f_i) + abs(f_j) + 1e-6)
+            flow_gate = sigmoid(strength_diff)
+            pred_gate = flow_gate * np.exp(-dist)
+            pred_gate *= (1 + 2.0 * curvature_i)
+
+            # --- 2️⃣ diffusion ---
+            diffusion_term += K * learn_gate * cultural_gate * (rho_j - rho_i)  # 模仿
+
+            # === 2️⃣ selection（replicator）===
+            selection_term += K * (f_j - f_i)
+
+            # --- resource flux ---
+            resource_flow += K * flow_gate * (b.resource - r_i)
+
+            # === 3️⃣ transport（捕食 → 空间推进）===
+            direction = (x_j - x_i) / (dist + 1e-6)
+            transport_term += K * pred_gate * direction
+
+            # --- 3️⃣ fitness（selection准备） ---
+            f_j = b.purity_val * max(0.0, b.resource)
+            fitness_accum += K * f_j
+
+            weight_sum += K
+
+        # === diffusion ===
+        self.rho_plan += D * diffusion_term / weight_sum  # 0.02~0.05 模仿融合
+        # === selection（replicator）===
+        self.rho_plan += S * (selection_term / weight_sum) * rho_i  # 0.05~0.1
+
+        # self.z += T * transport_term / weight_sum
+
+        self.resource += R * resource_flow / weight_sum
+        self.resource = max(1e-6, self.resource)
+        # --- entropy（抗塌缩）---
+        H = -np.real(np.trace(rho_i @ np.log(rho_i + 1e-8)))
+        entropy_force = 0.02 * (1.0 - H)
+        # === anti-collapse normalize ===
+        self.rho_plan /= np.trace(self.rho_plan) + 1e-12
+        # === mutation（底噪）===
+        instability = (1 - entropy) + np.abs(selection_term / weight_sum)
+
+        mutation_prob = sigmoid(instability)
+        if random.random() < 0.02 * mutation_prob:
+            g = self.model.random_walk(length=1)
+            self.emulate(g)
+            # teacher = random.choice(list(other_agent.memory))
+            # g = CubieMove.build(self.state, teacher)  # 带着求经问道之心
+            # U = self.model.project_move(g.rho())
+            # teacher_rho = U @ self.rho_plan @ U.conj().T
 
     def gather_resource(self, neighbors):
         """获取资源：生态位匹配 + 局部空间场"""
@@ -1934,7 +2281,7 @@ class HybridAgent:
     def reproduce(self, max_length=4):
         """繁殖：只有高纯度 + 低能量时才产生后代"""
         # 经典小变异
-        length = random.randint(1, max_length)
+        length = random.randint(2, max_length)
         child_state = self.state.clone()
         if random.random() < 0.3:
             g = self.model.random_walk(length=length)
@@ -1945,10 +2292,7 @@ class HybridAgent:
                 m = g @ h @ g.inverse() @ h.inverse()  # ghg⁻¹h⁻¹
                 child_state = m.act(child_state)
 
-        child = HybridAgent(child_state, self.env)
-        # 量子遗传（变异）
-        child.rho_a, _ = self.env.mutate(child.rho_a, length=random.randint(2, max_length))
-        child.rho_b = child.rho_a.copy()
+        child = HybridAgent(child_state, self.env, mutate_length=length)
         child.species_id = self.species_id  # 遗传物种标签
         child.pos = self.pos + 0.4 * np.random.randn(2)
 
@@ -1957,24 +2301,35 @@ class HybridAgent:
         # 部分记忆继承
         child.memory = deque(list(self.memory)[:6], maxlen=10)
         child.memory.append(child_state)
+        self.children.append(child)
         self.interact_count[2] += 1  # 繁殖计数
         return child
 
     def vector(self):
         "behavior:行为向量,策略签名"
+        energy_rate = self.energy_delta_cum / max(1, self.age)
+        entropy_rate = self.entropy_delta_cum / max(1, self.age)
+        resource_rate = self.resource / max(1, self.age)
+        mem_drift = 1.0 - self.consistency_val  # 轨道偏移量
         return np.array([
+            # --- 状态 ---
+            self.plan_entropy_val,
             self.purity_val,
-            self.entropy_val,
             self.fidelity_val,
             self.divergence_val,
+
+            self.move_entropy_val,
             self.curvature_val,
             self.chaos_val,
-
-            self.resource,
             self.alignment,
-            self.suitability,
-            self.stats['move_probs_mean'],  # 行为模式
-            self.stats['move_probs_std'],
+            # --- 行为 ---
+            energy_rate,  # 运动强度/ 动力学速度
+            entropy_rate,  # 认知活跃度/ 探索程度
+            mem_drift,  # 轨道稳定性/行为一致性
+            resource_rate,
+            self.confidence,
+            # self.stats['move_probs_mean'],  # 行为模式
+            # self.stats['move_probs_std'],
         ])
 
 
@@ -1984,6 +2339,21 @@ class HybridSimulation:
     微观	群作用（Cubie）	真实动力
     中观	slow manifold	结构压缩
     宏观	density / entropy	统计行为
+    agent:
+        rho → rho_plan
+        rho_mem → 调参数
+        ↓
+    interact_kernel → 局部传播
+
+    simulation:
+        agents → rho_collective（全局抽象）
+
+    rho_collective:
+        → dream（生成新结构）
+        → 弱反馈 → rho_mem
+
+    最终：
+        memory → policy → action
     """
 
     def __init__(self, env: Environment, n_agents=25):
@@ -1994,11 +2364,13 @@ class HybridSimulation:
             HybridAgent(CubieBase.generate_cubie(length=random.randint(3, 12)), env)
             for _ in range(n_agents)
         ]
+        self.rho_collective = None  # 全局共享记忆场,群体共同的“潜意识”
         self.history = []
         self.population_history = []
-        self.stats = {'n_agents': len(self.agents), 'n_target': len(env.targets), 'birth_cum': 0, 'death_cum': 0,
-                      'P': 0}
-        self.env.context = self.stats  # 环境上下文共享统计数据
+        self.stats = {'n_agents': len(self.agents), 'n_targets': len(env.targets), 'n_species': 0,
+                      'birth_cum': 0, 'death_cum': 0, "resource_mean": 1.0, 'step_time': 0.0, 'P': 0, 'T': 1.0}
+        # self.env.context = self.stats  # 环境上下文共享统计数据
+        self.move_counter = np.zeros(len(self.env.move_pairs), dtype=int)
         self.record()
 
     def record(self):
@@ -2006,15 +2378,18 @@ class HybridSimulation:
             return
         zs = np.stack([a.z for a in self.agents])
         self.population_history.append(zs)
+        self.env.update_context(**self.stats)
 
-    def step(self, T=1 / 9, L=1, K=300, k_neighbors=10):
+    def step(self, T=1 / 9, L=1, S: int = 10, K=300, k_neighbors=10):
         # 1. 所有 agent 演化
+        import time
+        t0 = time.perf_counter()
         for i, a in enumerate(self.agents):
             neighbors = [b for b in self.agents if a is not b]
             neighbors = random.sample(neighbors, min(k_neighbors, len(neighbors))) if neighbors else None
-            a.step(T, L=L, neighbors=neighbors)
+            a.step(T, L=L, S=S, neighbors=neighbors)
 
-        self.assign_species(min_samples=4)  # 每步重新分配物种 ID，基于当前的 z 向量聚类
+        self.assign_species(eps=0.5, min_samples=3)  # 每步重新分配物种 ID，基于当前的 z 向量聚类
 
         self.interaction(k_neighbors=k_neighbors)  # 2. 邻居交互（模仿 + 捕食）
 
@@ -2023,6 +2398,9 @@ class HybridSimulation:
 
         # 4. 死亡
         self.death(K)
+
+        t1 = time.perf_counter()
+        self.stats['step_time'] = t1 - t0
 
         # 5. 记录
         self.record()
@@ -2035,7 +2413,7 @@ class HybridSimulation:
         cluster_id = 0
 
         # 预计算 signature
-        sigs = [self.model.chaos_signature(a.z, sig_samples) for a in self.agents]
+        sigs = [self.env.model.chaos_signature(a.z, sig_samples) for a in self.agents]
 
         def region_query(i):
             return [j for j in range(n) if np.linalg.norm(sigs[i] - sigs[j]) < eps]
@@ -2090,16 +2468,96 @@ class HybridSimulation:
 
         # X = [a.rho_b.flatten().real for a in self.agents]
         # X = np.stack([a.preference for a in agents])
-        X = np.stack([np.concatenate([phase_signature(a), a.vector()]) for a in self.agents])
-        X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+        X = np.stack([np.concatenate([a.vector(), phase_signature(a)]) for a in self.agents])
+        # X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+        # X[:, :7] = (X[:, :7] - X[:, :7].mean(0)) / (X[:, :7].std(0) + 1e-8)
         species = dbscan(X, eps=eps, min_samples=min_samples)
 
         for a, s in zip(self.agents, species):
             a.species_id = s
 
+        self.stats['n_species'] = len(set(s for s in species if s >= 0))
         return species
 
-    def interaction(self, k_neighbors=8, slow_radius=5.0, pos_radius=4.5):
+    def update_collective(self, agents):
+        """每一步更新集体大脑"""
+        if len(agents) < 2:
+            return
+        rhos = [a.rho_mem for a in agents]
+        weights = []
+        for a in agents:
+            w = (
+                    0.5 * a.fidelity_val +
+                    0.3 * (1 - a.plan_entropy_val) +
+                    0.2 * a.purity_val
+            )
+            weights.append(w)
+
+        weights = np.array(weights)
+        weights /= weights.sum() + 1e-8
+
+        # 加权平均,收集当前所有 agent 的 rho_mem 贡献
+        contrib = sum(w * r for w, r in zip(weights, rhos))
+        contrib /= np.trace(contrib) + 1e-12
+
+        # --- 2️⃣ 初始化 ---
+        if self.rho_collective is None:
+            self.rho_collective = contrib.copy()
+            return
+
+        # --- 3️⃣ 动态融合率（关键）---
+        avg_entropy = np.mean([a.plan_entropy_val for a in agents])
+        diversity = np.mean([
+            np.linalg.norm(a.z - b.z)
+            for a in agents for b in agents if a is not b
+        ])
+
+        alpha = 0.08 + 0.12 * avg_entropy + 0.05 * np.tanh(diversity)
+
+        # --- 4️⃣ EMA 更新,弱融合进集体记忆 ---
+        self.rho_collective = (1 - alpha) * self.rho_collective + alpha * contrib
+
+        # --- 5️⃣ anti-collapse（关键！）---
+        dim = self.rho_collective.shape[0]
+        I = np.eye(dim) / dim
+
+        mix = 0.02 + 0.05 * (1 - avg_entropy)
+        self.rho_collective = (1 - mix) * self.rho_collective + mix * I
+
+        # --- 6️⃣ normalize ---
+        self.rho_collective /= np.trace(self.rho_collective) + 1e-12
+
+        # --- 7️⃣ 记录 entropy ---
+        self.stats['collective_entropy'] = von_neumann_entropy(self.rho_collective)
+
+    def collective_dream(self, steps=3, T=0.9):
+        """ 触发集体 dream,越“不稳定的人”越受群体影响"""
+        if self.rho_collective is None:
+            return None
+
+        rho = self.rho_collective.copy()
+
+        for _ in range(steps):
+            # ---  policy:在集体记忆空间进行轻微演化 ---
+            f = self.model.move_scores_from_rho(rho)
+            p = softmax(f / T)
+
+            idx = np.random.choice(len(p), p=p)
+            _, U = self.env.move_pairs[idx]
+
+            rho = U @ rho @ U.conj().T
+            rho /= np.trace(rho) + 1e-12
+
+        # 梦境回馈给所有 agent（弱影响）
+        for a in self.agents:  # 需要把 agents 传进来或全局持有
+            # align = np.real(np.trace(a.rho_plan @ rho))
+            strength = 0.05 * (1 - a.fidelity_val)
+            a.rho_mem = (1 - strength) * a.rho_mem + strength * rho
+            a.rho_mem /= np.trace(a.rho_mem) + 1e-12
+
+        return rho
+
+    def interaction(self, k_neighbors=8, slow_radius=5.0, pos_radius=4.0):
         """
         Top-K 邻居交互,所有 agent 状态更新后再进行邻居交互
         k: 每个 agent 最多交互的邻居数量
@@ -2109,9 +2567,9 @@ class HybridSimulation:
         if len(self.agents) < 2:
             return
 
+        n_species = self.stats['n_species']
         for a in self.agents:
             candidates = []
-
             for b in self.agents:
                 if a is b:
                     continue
@@ -2124,18 +2582,44 @@ class HybridSimulation:
 
             # 选 Top-K
             candidates.sort(key=lambda x: x[0], reverse=True)  # 分数越高越优先
-            neighbors = [b for _, b, *_ in candidates[:k_neighbors]]
-            values = [{"slow_d": slow_d, "pos_d": pos_d} for _, _, slow_d, pos_d in candidates[:k_neighbors]]
+            selected = candidates[:k_neighbors]
+            neighbors = [b for _, b, *_ in selected]
 
+            if not neighbors:
+                continue
+
+            values = [{"slow_d": item[2], "pos_d": item[3]} for item in selected]
+            diversity = np.mean([item[2] for item in selected]) if selected else 2.0 * np.pi
+            a.stats['diversity'] = diversity
             # 执行交互
-            if neighbors:
-                a.interact(neighbors, values)
+            if n_species <= 3:
+                # 只负责和给定的邻居列表交互（慢空间模仿 + 量子捕食）
+                for b, d in zip(neighbors, values or [{}] * len(neighbors)):
+                    if a is b: continue
+                    directed_d = np.dot(b.z - a.z, a.preference).real  # 方向性判断
+                    d['directed_d'] = directed_d
+                    slow_d = d.get("slow_d", np.linalg.norm(a.z - b.z))
+                    pos_d = d.get("pos_d", np.linalg.norm(a.pos - b.pos))
+                    if a.species_id == b.species_id:  # 同族：学习
+                        # 慢空间吸引/排斥
+                        interaction_strength = 1.0 - (slow_d / (diversity + 1e-8))
+                        if slow_d < 2 * np.pi and random.random() < interaction_strength:
+                            a.imitate(b, data=d)
+                    elif a.target_id == b.target_id:  # 异族：竞争
+                        predator_prob = np.exp(-len(neighbors) / 10.0) * 1 / (1 + n_species)  # species 越少越小,越拥挤越少打
+                        if pos_d < 5 and random.random() < predator_prob:
+                            a.predator(b, data=d)
+                    elif a.level < b.level:
+                        pass
+            else:
+                a.interact_kernel(neighbors, values)
 
     def reproduce(self, K=300):
         new_agents = []
-        density = len(self.agents) / K
+        N = len(self.agents)
+        density = N / K
         fitness = [0.5 * a.resource + 0.4 * a.purity_val + 0.3 * np.tanh(
-            a.energy / 30) + 0.2 * a.entropy_val + 0.1 * np.exp(-((a.age - 50) ** 2) / 3600) for a in self.agents]
+            a.energy / 30) + 0.2 * a.alignment + 0.1 * np.exp(-((a.age - 50) ** 2) / 3600) for a in self.agents]
         threshold = np.percentile(fitness, 80)
         for a, s in zip(self.agents, fitness):
             birth_prob = (0.05 + 0.1 * s) * np.exp(- density)
@@ -2152,24 +2636,22 @@ class HybridSimulation:
     def death(self, K=300):
         N = len(self.agents)
         if N > K:
-            survival_prob = K / N
+            resource_mean = self.stats.get("resource_mean", 1.0)
+            life_activity_mean = self.stats.get("life_activity_mean", 1.0)
+            base_prob = np.clip(0.2 + 0.8 * np.tanh((resource_mean + life_activity_mean) / 5), 0, 1)
+            density = N / K  # 高密度惩罚
+            survival_prob = base_prob * np.exp(-max(0, density - 1))
             self.agents = [a for a in self.agents
-                           if
-                           a.purity_val > 0.2 and a.fidelity_val > 0.1 and a.resource > -4.0 and a.energy < 50.0 and a.age < 500
+                           if a.purity_val > 0.15 and a.consistency_val > 0.05 and a.divergence_val < 1.0
+                           and a.resource > -4.0 and a.energy < 50.0 and a.age < 500
                            and random.random() < survival_prob]
         else:
             self.agents = [a for a in self.agents
-                           if a.purity_val > 0.15 and a.fidelity_val > 0.05 and a.resource > -5.0 and a.age < 500
-                           ]
+                           if a.purity_val > 0.1 and a.consistency_val > 0.05 and a.resource > -5.0 and a.age < 500]
         self.stats["n_agents"] = len(self.agents)
         died = N - self.stats["n_agents"]
         self.stats['death_cum'] += died
         return died
-
-    # def generate_target(self):
-    #     """动态目标生成：周期性 + 随机扰动,新的吸引子"""
-    #     t = len(self.history)
-    #     base_target = self.targets[0]  # 固定目标
 
     def observe(self):
         """全部掉到“高能壳层”上了,慢空间的几何结构已经塌成一层壳了,所以只能统计行为特征了"""
@@ -2179,7 +2661,6 @@ class HybridSimulation:
                 "energy_mean": 0.0,
                 "chaos_mean": 0.0,
                 "n_agents": 0,
-                "species": 0
             }
             self.history.append(obs)
             return obs
@@ -2188,40 +2669,56 @@ class HybridSimulation:
         es = [a.energy for a in self.agents]
         cs = [a.chaos_val for a in self.agents]
         rs = [a.resource for a in self.agents]
-        ss = [a.suitability for a in self.agents]
-        ts = [a.stats['T_prob'] for a in self.agents]
+
+        ts = [a.stats['T'] for a in self.agents]
+        ts2 = [a.stats['T_phase'] for a in self.agents]
         fs = [a.fidelity_val for a in self.agents]
         ds = [a.divergence_val for a in self.agents]
 
         curvature = [a.curvature_val for a in self.agents]
-        entropy = [a.entropy_val for a in self.agents]
+        confidence = [a.confidence for a in self.agents]
+        consistency = [a.consistency_val for a in self.agents]
+        entropy = [a.plan_entropy_val for a in self.agents]
+        move_entropy = [a.move_entropy_val for a in self.agents]
+        entropy_deltas = [a.entropy_delta_cum for a in self.agents]
+        energy_deltas = [a.energy_delta_cum / (a.age + 1) for a in self.agents]
         age = [a.age for a in self.agents]
 
         alignment = [a.alignment for a in self.agents]
         prefs = np.std(np.stack([a.preference for a in self.agents]), axis=0)
-        species = set(a.species_id for a in self.agents)
 
         phase_counts = np.sum([a.phase_count for a in self.agents], axis=0)
         phase_ratios = phase_counts / (phase_counts.sum() + 1e-8)
         interact_counts = np.array([a.interact_count / max(1, a.age) for a in self.agents])
         interact_ratios = interact_counts.mean(axis=0)
-        # phases = [a.stats['phase'] for a in self.agents]
-        # levels = [a.level for a in self.agents]
-        # target_ids = [a.target_id for a in self.agents]
-        bb_like = [a.purity_val > 0.9 and a.entropy_val < 0.3 for a in self.agents]
+        hit_counts = [a.interact_count[5] for a in self.agents]
+
+        diversity = [a.stats.get('diversity', 0.0) for a in self.agents]
+        move_probs_std = [a.stats.get('move_probs_std', 0.0) for a in self.agents]
+        bb_like = [a.purity_val > 0.9 and a.plan_entropy_val < 0.3 for a in self.agents]
+
+        move_ids = [a.stats['move_id'] for a in self.agents if a.stats['move_id'] != -1]
+        ids, counts = np.unique(move_ids, return_counts=True)
+        self.move_counter[ids] += counts
         obs = {
             "purity_mean": np.mean(ps),
+            "fidelity_mean": np.mean(fs),
+            "consistency_mean": np.mean(consistency),
+            "divergence_mean": np.mean(ds),
+
+            "plan_entropy_mean": np.mean(entropy),
+            "move_entropy_mean": np.mean(move_entropy),
             "energy_mean": np.mean(es),
             "chaos_mean": np.mean(cs),  # 0.275
-            "fidelity_mean": np.mean(fs),
-            "divergence_mean": np.mean(ds),
+            "curvature_mean": np.mean(curvature),
 
             "resource_mean": np.mean(rs),
             "age_mean": np.mean(age),  # 23
-            "suitability_mean": np.mean(ss),
             "temperature_mean": np.mean(ts),
-            "curvature_mean": np.mean(curvature),
-            "plan_entropy_mean": np.mean(entropy),
+            "temperature_phase_mean": np.mean(ts2),
+            "alignment_mean": np.mean(alignment),
+            "confidence_mean": np.mean(confidence),
+            'diversity_mean': np.mean(diversity),  # 邻居差异性
 
             "resource_std": np.std(rs),
             "resource_max": np.max(rs),
@@ -2232,13 +2729,11 @@ class HybridSimulation:
             "curvature_max": np.max(curvature),
             "purity_min": np.min(ps),
             "fidelity_min": np.min(fs),
+            'consistency_min': np.min(consistency),
             "divergence_max": np.max(ds),
-            "alignment_mean": np.mean(alignment),
-            'suitability_max': np.max(ss),
+            'confidence_max': np.max(confidence),
             "temperature_max": np.max(ts),
             "pref_diversity": np.mean(prefs),  # preference 向量多样性
-
-            "species": len(species) - (1 if -1 in species else 0),
 
             'exploit_ratio': phase_ratios[0],
             'revert_ratio': phase_ratios[1],
@@ -2249,56 +2744,77 @@ class HybridSimulation:
             'predator_avg': interact_ratios[1],
             'reproduce_avg': interact_ratios[2],
             'emulate_avg': interact_ratios[3],
-            'crisis_avg': interact_ratios[5],
+            'hit_count': np.sum(hit_counts),
             'bb_lifetime_avg': interact_ratios[4],  # 0.06~0.314 虚假记忆快速被现实修正
             "bb_fraction": float(np.mean(bb_like)),  # boltzmann_brain
             "bb_count": np.sum(bb_like),
-            # "phase_distribution": dict(zip(*np.unique(phases, return_counts=True))),
-            # "level_distribution": dict(zip(*np.unique(levels, return_counts=True))),
-            # "target_distribution": dict(zip(*np.unique(target_ids, return_counts=True))),
+
+            'move_probs_std_mean': float(np.mean(move_probs_std)),
+            'life_activity_mean': np.mean(entropy_deltas),  # 生命长度/活跃度(认知层面的变化)
+            'cumulative_energy_delta_mean': np.mean(energy_deltas),
         }
+        self.stats["resource_mean"] = obs["resource_mean"]
+        self.stats["age_mean"] = obs["age_mean"]
+        self.stats["life_activity_mean"] = obs["life_activity_mean"]
         obs.update(self.stats)  # 添加统计
         self.history.append(obs)
         return obs
 
-    def evolve(self, steps=300, max_k=300, print_every=10):
+    def save(self, filename=None):
+        import pickle
+        if filename is None:
+            filename = os.path.join(DATA_DIR, "simulation_data.pkl")
+        with open(filename, 'wb') as f:
+            pickle.dump(self.history, f)
+
+    def evolve(self, steps=300, max_k=300, print_every=10, base_temp=1.0 / 9.0):
         K = len(self.agents)
         P = 0
         targets = self.env.base_targets(type=1)
-        base_temp = 1.0 / 9.0
+        prev_short_osc = 0.0
 
         for t in range(steps):
             a, b = divmod(t, 10)
             if b == 0 and K < max_k:
                 K += 8 * (a + 1)
+                self.stats['K'] = K
+
             T = base_temp
             if t < 3:  # 初期强探索
-                T = 2 / 3
+                T = 4.0 * base_temp
                 P = 1
             elif t < model.Tf:
-                T = 1 / 3
+                T = 3.0 * base_temp
                 P = 2
-            elif t > 3 * model.Tf:  # 周期性温度波动
-                short_osc = 0.45 * np.sin(2 * np.pi * t / 32)
-                long_osc = 0.35 * np.sin(2 * np.pi * t / 100)
+            elif t < 3 * model.Tf:
+                P = 3
+            else:  # 周期性温度波动
+                short_osc = 2.0 / 3. * np.sin(2 * np.pi * t / 32)
+                long_osc = 1.0 / 3 * np.sin(2 * np.pi * t / 100)
                 temp_osc = short_osc + long_osc
-                T = max(0.0, base_temp + temp_osc * (1.0 + 2 * long_osc))  # 双频扰动
-                if abs(short_osc) < 0.03:  # 接近零点/ 接近波峰
+                T = 2.0 * base_temp * (1.0 + temp_osc * (1.0 + 3 * long_osc))  # 双频扰动 0.25~3
+                if (prev_short_osc < 0) and (short_osc >= 0):  # 接近零点/ 接近波峰
                     print(
                         f"[t={t}] 温度峰值扰动！新阶段 Phase {P},T={T:.3f} (short_osc={short_osc:.3f}, long_osc={long_osc:.3f})")
                     P += 1
+                prev_short_osc = short_osc
 
+            S = 10
             if self.stats.get('P', 0) != P:
-                self.stats['P'] = P
-                self.stats['n_target'] = len(self.env.targets)
-                if P < 3:
+                if P <= 3:
                     new_targets = targets.pop()
                     self.env.add_target(new_targets)
-                elif self.stats['n_target'] < 30:
-                    new_targets = self.env.generate_far_target()  # 每次温度峰值时生成新目标
+                elif len(self.env.targets) < 30:
+                    new_targets = self.env.generate_diff_target()  # 每次温度峰值时生成新目标
                     self.env.add_target(new_targets)  # 添加新目标，增加环境复杂度
 
-            self.step(T=T, K=K)
+                self.stats['P'] = P
+                self.stats['n_targets'] = self.env.context['n_targets']
+                S = 1
+
+            self.stats['T'] = T
+
+            self.step(T=T, S=S, K=K)
             obs = self.observe()
 
             if obs["n_agents"] == 0:
@@ -2312,7 +2828,18 @@ class HybridSimulation:
 
             if t % print_every == 0:
                 obs_display = {k: f"{float(v):.3f}" for k, v in obs.items()}
-                print(f"[{t:3d}] obs={obs_display} K={K}")
+                phases = [a.stats['phase'] for a in self.agents]
+                move_ids = [a.stats['move_id'] for a in self.agents if a.stats['move_id'] != -1]
+                levels = [a.level for a in self.agents]
+                target_ids = [a.target_id for a in self.agents]
+                obs_distribution = {
+                    "phase": {int(k): int(v) for k, v in zip(*np.unique(phases, return_counts=True)) if k >= 0},
+                    "level": {int(k): int(v) for k, v in zip(*np.unique(levels, return_counts=True))},
+                    "target": {int(k): int(v) for k, v in zip(*np.unique(target_ids, return_counts=True))},
+                    "move": {int(k): int(v) for k, v in zip(*np.unique(move_ids, return_counts=True))}
+                }
+                print(f"[{t:3d}] obs={obs_display} \ndistribution={obs_distribution}")
+                print(self.move_counter)
 
     def compute_flow(self):
         flows = []
@@ -2368,9 +2895,10 @@ class HybridSimulation:
 
         fidelity = [h['fidelity_mean'] for h in self.history]
         plan_entropy = [h['plan_entropy_mean'] for h in self.history]
+        consistency = [h['consistency_mean'] for h in self.history]
+
         divergence = [h['divergence_mean'] for h in self.history]
         resource = [h['resource_mean'] for h in self.history]
-        resource_std = [h['resource_std'] for h in self.history]
 
         n = [h['n_agents'] for h in self.history]
 
@@ -2380,11 +2908,11 @@ class HybridSimulation:
         axs[0, 2].plot(steps, chaos, 'g-', label='Commutator Chaos')
 
         axs[1, 0].plot(steps, fidelity, 'c-', label='Fidelity')
-        axs[1, 1].plot(steps, plan_entropy, 'o-', label='Plan Entropy')
-        axs[1, 2].plot(steps, divergence, 'y-', label='Divergence')
+        axs[1, 1].plot(steps, plan_entropy, 'brown', label='Plan Entropy')
+        axs[1, 2].plot(steps, consistency, 'y-', label='Consistency Mean')
 
-        axs[2, 0].plot(steps, resource, 'b-', label='Resource')
-        axs[2, 1].plot(steps, resource_std, 'b--', label='Resource Std')
+        axs[2, 0].plot(steps, divergence, 'k-', label='Divergence')
+        axs[2, 1].plot(steps, resource, 'b-', label='Resource')
         axs[2, 2].plot(steps, n, 'm-', label='Population')
         for ax in axs.flat:
             ax.grid(True, alpha=0.3)
@@ -2396,26 +2924,26 @@ class HybridSimulation:
         """其他 9 个指标的演化图"""
         steps = np.arange(len(self.history))
 
-        age = [h.get('age_mean', 0) for h in self.history]
-        temperature = [h.get('temperature_mean', 0) for h in self.history]
         alignment = [h.get('alignment_mean', 0) for h in self.history]
+        temperature = [h.get('temperature_mean', 0) for h in self.history]
+        diversity = [h.get('diversity_mean', 0) for h in self.history]
 
         curvature = [h.get('curvature_mean', 0) for h in self.history]
-        suitability = [h['suitability_mean'] for h in self.history]
-        death = [h.get('death_cum', 0) for h in self.history]
+        confidence = [h['confidence_mean'] for h in self.history]
+        move_probs_std = [h.get('move_probs_std_mean', 0) for h in self.history]
 
         bb_fraction = [h.get('bb_fraction', 0) for h in self.history]
-        species = [h.get('species', 0) for h in self.history]
+        species = [h.get('n_species', 0) for h in self.history]
         pref_diversity = [h.get('pref_diversity', 0) for h in self.history]
 
         fig, axs = plt.subplots(3, 3, figsize=(18, 12))
         axs[0, 0].plot(steps, alignment, 'm-', label='Alignment')
-        axs[0, 1].plot(steps, age, 'y-', label='Age Mean')
-        axs[0, 2].plot(steps, temperature, 'orange', label='Temperature Mean')
+        axs[0, 1].plot(steps, temperature, 'orange', label='Temperature Mean')
+        axs[0, 2].plot(steps, diversity, 'y-', label='Diversity Mean')
 
         axs[1, 0].plot(steps, curvature, 'purple', label='Curvature')
-        axs[1, 1].plot(steps, suitability, 'navy', label='Suitability')
-        axs[1, 2].plot(steps, death, 'teal', label='Death Cumulative')
+        axs[1, 1].plot(steps, confidence, 'navy', label='Confidence')
+        axs[1, 2].plot(steps, move_probs_std, 'teal', label='Move Probabilities Std')
 
         axs[2, 0].plot(steps, bb_fraction, 'k-', label='Boltzmann Brain Fraction')
         axs[2, 1].plot(steps, species, 'gold', label='Species Count')
@@ -2425,6 +2953,46 @@ class HybridSimulation:
             ax.grid(True, alpha=0.3)
             ax.legend()
         plt.suptitle('Additional Metrics Evolution', fontsize=16, y=1.0)
+        plt.tight_layout()
+        plt.show()
+
+    def plot_extra_metrics(self):
+        """绘制额外9个指标的演化图"""
+        steps = np.arange(len(self.history))
+
+        resource_std = [h['resource_std'] for h in self.history]
+        curvature_max = [h.get('curvature_max', 0) for h in self.history]
+        entropy_max = [h.get('entropy_max', 0) for h in self.history]
+
+        life_activity = [h.get('life_activity_mean', 0) for h in self.history]  # entropy_deltas
+        cumulative_energy_delta = [h.get('cumulative_energy_delta_mean', 0) for h in self.history]  # energy_deltas
+        age = [h.get('age_mean', 0) for h in self.history]
+
+        death = [h.get('death_cum', 0) for h in self.history]
+        birth = [h.get('birth_cum', 0) for h in self.history]
+
+        hit_count = [h.get('hit_count', 0) for h in self.history]
+        bb_count = [h.get('bb_count', 0) for h in self.history]
+
+        fig, axs = plt.subplots(3, 3, figsize=(18, 12))
+
+        axs[0, 0].plot(steps, curvature_max, 'purple', label='Curvature Max')
+        axs[0, 1].plot(steps, entropy_max, 'darkgreen', label='Plan Entropy Max')
+        axs[0, 2].plot(steps, resource_std, 'teal', label='Resource Std')
+
+        axs[1, 0].plot(steps, life_activity, 'magenta', label='Life Activity (Entropy Deltas)')
+        axs[1, 1].plot(steps, cumulative_energy_delta, 'orange', label='Cumulative Energy Delta')
+        axs[1, 2].plot(steps, age, 'cyan', label='Age Mean')
+
+        axs[2, 0].plot(steps, death, 'brown', label='Death Cumulative')
+        axs[2, 0].plot(steps, birth, 'navy', label='Birth Cumulative')
+        axs[2, 1].plot(steps, hit_count, 'red', label='Hit Target Count')
+        axs[2, 2].plot(steps, bb_count, 'darkblue', label='Boltzmann Brain Count')
+
+        for ax in axs.flat:
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        plt.suptitle('Extra Metrics Evolution (New Variables)', fontsize=16, y=1.0)
         plt.tight_layout()
         plt.show()
 
@@ -2467,7 +3035,7 @@ class HybridSimulation:
         predator = [h.get('predator_avg', 0) for h in recent]
         reproduce = [h.get('reproduce_avg', 0) for h in recent]
         emulate = [h.get('emulate_avg', 0) for h in recent]
-        crisis = [h.get('crisis_avg', 0) for h in recent]
+        # crisis = [h.get('crisis_avg', 0) for h in recent]
         bb_lifetime = [h.get('bb_lifetime_avg', 0) for h in recent]
 
         plt.figure(figsize=(12, 8))
@@ -2476,7 +3044,7 @@ class HybridSimulation:
         plt.plot(steps, predator, label='Predator', linewidth=2.5, color='tab:red')
         plt.plot(steps, reproduce, label='Reproduce', linewidth=2.5, color='tab:green')
         plt.plot(steps, emulate, label='Emulate', linewidth=2.5, color='tab:orange')
-        plt.plot(steps, crisis, label='Crisis', linewidth=2.5, color='tab:purple')
+        # plt.plot(steps, crisis, label='Crisis', linewidth=2.5, color='tab:purple')
         plt.plot(steps, bb_lifetime, label='BB Lifetime', linewidth=2.5, color='tab:cyan', linestyle='--')
 
         plt.title("Average Interaction Counts per Agent over Time")
@@ -2487,817 +3055,64 @@ class HybridSimulation:
         plt.tight_layout()
         plt.show()
 
+    def plot_agent_rho(self, rho_type='rho_plan'):
+        """
+        找出 age 最大的 Agent，并画出它的 rho 热力图
+        rho_type 可选: 'rho', 'rho_plan', 'rho_mem'
+        """
+        import seaborn as sns
+        # 找出 age 最大的 Agent
+        oldest_agent = max(self.agents, key=lambda a: a.age)
+        # 额外打印一些信息
+        print(f"Agent (age={oldest_agent.age})")
+        print(f"  Purity (rho_plan): {oldest_agent.purity_val:.4f}")
+        print(f"  Fidelity: {oldest_agent.fidelity_val:.4f}")
+        print(f"  Divergence: {oldest_agent.divergence_val:.4f}")
+        print(f"  Entropy: {oldest_agent.plan_entropy_val:.4f}")
+
+        # 获取对应的 rho
+        if rho_type == 'rho_plan':
+            rho = oldest_agent.rho_plan
+            rho_name = 'rho_plan (规划态)'
+        elif rho_type == 'rho_mem':
+            rho = oldest_agent.rho_mem
+            rho_name = 'rho_mem (长期记忆)'
+        else:
+            rho = oldest_agent.rho
+            rho_name = 'rho'
+
+        # 转为实部矩阵（热力图通常看实部或绝对值）
+        rho_real = np.real(rho)
+        mask = np.triu(np.ones_like(rho_real, dtype=bool), k=1)
+        plt.figure(figsize=(10, 8))
+        # sns.heatmap(np.abs(rho), cmap='viridis', annot=False)
+        sns.heatmap(rho_real, mask=mask,
+                    cmap='RdBu_r',
+                    center=0,
+                    annot=False,
+                    cbar_kws={'label': 'Real Part'})
+
+        plt.title(f"Agent rho Age = {oldest_agent.age} | {rho_name} | Purity = {oldest_agent.purity_val:.4f}")
+        plt.xlabel("Dimension Index")
+        plt.ylabel("Dimension Index")
+        plt.tight_layout()
+        plt.show()
+
+
+def main():
+    env = Environment(model=SlowDynamics(n=N_GENERATORS))
+    sim = HybridSimulation(env=env, n_agents=30)
+    sim.evolve(steps=123, print_every=10, max_k=400)
+    sim.plot_population()
+    sim.plot_metrics()
+    sim.plot_additional_metrics()
+    sim.plot_extra_metrics()
+    sim.plot_phase()
+    sim.plot_interaction()
+    sim.plot_agent_rho()
+    sim.plot_flow()
+    sim.save()
+
 
 if __name__ == '__main__':
-    from scipy.stats import pearsonr, spearmanr
-    import matplotlib.pyplot as plt
-    from rime.cubieoperator import poly_rank
-
-    import os
-
-    # Adjust these paths to match your actual Tcl/Tk directories
-    os.environ['TCL_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tcl8.6'
-    os.environ['TK_LIBRARY'] = r'D:\Program Files\Python\Python313\tcl\tk8.6'
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
-    model = SlowDynamics(n=18)
-
-
-    def simulate_time_crystal(model, steps=300, mode_indices=[0, 1, 2]):
-        """
-        在慢流形上模拟离散时间晶格相
-        使用前几个慢模式（谐函数）作为序参量
-        """
-        # 取前几个慢模式（通常 λ=7/9 或 2/3）
-        V_modes = model.V[:, mode_indices]  # (228, 3) 选取的谐函数
-        w_modes = model.w[mode_indices]  # 对应的特征值
-
-        # 初始状态：随机扰动 + 投影到慢空间
-        state0 = CubieBase.generate_cubie(length=5)
-        z0 = model.project(state0.vector)  # 初始慢坐标
-
-        # 演化轨迹
-        trajectory = [z0]
-        for t in range(steps):
-            z_next = z0 * (w_modes ** t)  # 精确慢演化（Koopman）
-            trajectory.append(z_next)
-
-        trajectory = np.array(trajectory)  # (steps+1, 100)
-
-        # 投影到前3个慢模式（用于可视化）
-        proj = trajectory @ V_modes  # (steps+1, 3)
-
-        # 可视化：时间晶格的周期轨道
-        fig = plt.figure(figsize=(14, 10))
-
-        # 3D 相空间轨道（时间晶格的“闭合环”）
-        ax = fig.add_subplot(121, projection='3d')
-        ax.plot(proj[:, 0], proj[:, 1], proj[:, 2],
-                'b-', linewidth=2, label='Slow manifold trajectory')
-        ax.scatter(proj[0, 0], proj[0, 1], proj[0, 2],
-                   c='green', s=80, label='Initial state')
-        ax.set_xlabel('Slow Mode 1')
-        ax.set_ylabel('Slow Mode 2')
-        ax.set_zlabel('Slow Mode 3')
-        ax.set_title('Time Crystal Phase: Closed Orbit in Slow Manifold')
-        ax.legend()
-
-        # 时间序列图（展示周期性）
-        ax2 = fig.add_subplot(122)
-        for i in range(3):
-            ax2.plot(proj[:, i], label=f'Slow Mode {i + 1} (λ≈{w_modes[i]:.4f})', linewidth=2)
-        ax2.set_xlabel('Time step t')
-        ax2.set_ylabel('Projection onto slow modes')
-        ax2.set_title('Periodic Oscillation (Time Crystal Signature)')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.show()
-
-        # 打印周期性检测
-        print("时间晶格周期性检测（前3个慢模式）:")
-        for i in range(3):
-            period = np.argmax(np.correlate(proj[:, i], proj[:, i], mode='full')[steps:]) + 1
-            print(f"  Mode {i + 1}: 估计周期 ≈ {period} 步")
-
-        return trajectory, proj
-
-
-    # traj, proj = simulate_time_crystal(
-    #     model,
-    #     steps=300,
-    #     mode_indices=[0, 1, 2]  # 前3个慢模式（7/9）
-    # )
-
-    for n in [18, 16, 12, 10, 9, 8, 6, 4, 3, 2]:
-        model = SlowDynamics(n=n)
-        unique, counts = np.unique(np.round(model.w, 6), return_counts=True)
-        gen = model.rho_moves
-        m = len(gen) // 2
-        pred = [1 - k / m for k in range(m + 1)]
-        print('>-----', n, len(gen), pred)
-        print("dim span {ρ(g)}=", model.dim_algebra,
-              model.dim_algebra_slow, 'dim_s:',
-              model.dim_slow)  # generator algebra dim = 18/12/6,face-turn group 的轴结构强相关
-        a_s = model.V_slow.T.conj() @ model.A_micro @ model.V_slow
-        print('rank:', poly_rank(model.A_micro), poly_rank(a_s))  # 6 5
-        for u, c in zip(unique[::-1], counts[::-1]):
-            print(u, c)
-
-    """attention-like generator mixing
-     The spectrum of the averaged generator operator follows a universal form
-    λ = 1 − k/m, where m is the number of generator axes.
-    10 generators
-    1.0 52
-    0.8 36
-    0.6 64
-    0.4 68
-    0.2 8
-    6 generators dir=2 k/3
-    dim span {ρ(g)}= 6 6
-    rank: 5 4
-    1.0 72
-    0.666667 72
-    0.333333 84
-    6 generators axis=0
-    dim span {ρ(g)}= 6 1
-    rank: 4 2
-    1.0 100
-    0.5 8
-    0.333333 120
-    4 generators
-    1.0 100
-    0.5 80
-    0.25 8
-    0.0 40
-
-    >----- 2 2
-    慢层生成代数维度 ≈ 1
-    dim span {ρ(g)}= 2 1
-    rank: 2 2
-    1.0 148
-    0.0 80
-    """
-
-    prim_list = CubieMove.prim_moves.copy()
-    products2 = CubieBase.generate_compose_moves(prim_list, commutator=True)
-    print(f"18 两两组合后去重 + 去 identity + commutator 数量: {len(products2)}")  # 216
-    """6*6*6 = 3^3 × 2^3 """
-    comm_rho = {k: (m, m.rho()) for k, m in products2.items()}
-    # comm_slow = SlowDynamics(n=len(comm_rho), rho_moves=comm_rho)
-    # """Lambda 0.222222: multiplicity 8
-    # Lambda 0.296296: multiplicity 24
-    # Lambda 0.407407: multiplicity 24
-    # Lambda 0.527778: multiplicity 8
-    # Lambda 0.703704: multiplicity 72
-    # Lambda 0.722222: multiplicity 24
-    # Lambda 0.777778: multiplicity 36
-    # Lambda 0.814815: multiplicity 8
-    # Lambda 0.925926: multiplicity 4
-    # Lambda 1.000000: multiplicity 20
-    # Fast layer spectral radius: 0.527778,Estimated mixing time (ε=1e-6):  steps → Tf=22
-    # 144"""
-    # print(comm_slow.dim_slow)
-    # commutators = list(comm_slow.rho_slow.values())
-
-    model = SlowDynamics(n=18)
-
-    s1 = CubieBase.generate_cubie()
-    z1 = model.project(s1.vector)
-    z1 /= np.linalg.norm(z1)
-    r1 = np.outer(z1, z1.conj())
-    m = random.choice(list(CubieMove.prim_moves().values()))  # CubieBase.random_walk()
-    rho_m = m.rho()
-    U = model.project_move(rho_m)  # U 是慢空间投影后的近似 unitary，存在信息损失
-    r2 = U @ r1 @ U.conj().T  # 纯量子演化
-
-    rho1 = np.outer(s1.vector, s1.vector.conj())
-    rho2 = rho_m @ rho1 @ rho_m.conj().T  # 用原始空间的 rho_m 演化
-
-    s2 = m.act(s1)
-    z2 = model.project(s2.vector)
-    s2_v = s1.vector @ m.matrix
-    z2 /= np.linalg.norm(z2)
-    r21 = np.outer(z2, z2.conj())  # 经典演化后重新纯态化
-    rho22 = np.outer(s2.vector, s2.vector.conj())  # 经典 act 后直接外积
-
-    r22 = 2 / 3 * r1 + 1 / 3 * r21
-    r22 /= np.trace(r22)
-    r23 = 2 / 3 * r1 + 1 / 3 * r2
-    r23 /= np.trace(r23)
-    d1 = np.linalg.norm(r22 - r23, 'fro')
-    d2 = 0.5 * np.linalg.norm(r22 - r23, ord='nuc')
-
-    d3 = np.linalg.norm(r2 - r21, 'fro')
-    d4 = 0.5 * np.linalg.norm(r2 - r21, ord='nuc')  # r2（量子演化）和 r21（经典演化后纯态化）在慢空间的表示有系统性差异
-    d5 = 0.5 * np.linalg.norm(rho2 - rho22, ord='nuc')
-    print(d1, d2, d3, d4, d5)  # 0.35083967 0.24825998 0.7187361 26.457514/0.3773283 0.2673418 0.7693323
-    """两种路径在慢流形上的投影并不完全相同"""
-
-    s1 = CubieBase.generate_cubie()
-    z1 = model.project(s1.vector)  # (100,)
-    z1 /= np.linalg.norm(z1) + 1e-8
-    rho1 = np.outer(z1, z1.conj())  # 100×100 慢空间纯态
-    for key, m in CubieMove.prim_moves().items():
-        rho_m_full = m.rho()
-        U = model.project_move(rho_m_full)  # 投影到 100 维慢空间
-
-        rho2 = U @ rho1 @ U.conj().T  # 慢空间量子演化
-
-        # 4. 经典演化后投影到慢空间
-        s2 = m.act(s1)
-        z2 = model.project(s2.vector)  # (100,)
-        z2 /= np.linalg.norm(z2) + 1e-8
-        rho22 = np.outer(z2, z2.conj())  # 慢空间纯态
-
-        # 计算差异
-        d_fro = np.linalg.norm(rho2 - rho22, 'fro')
-        d_nuc = 0.5 * np.linalg.norm(rho2 - rho22, ord='nuc')
-
-        print(f"{key},Frobenius diff: {d_fro:.6f}，Nuclear/Trace diff: {d_nuc:.6f}")  # 范围大约 0.56 ~ 0.88，平均在 0.72 左右
-
-    """"Nuclear Norm（迹距离）比 Frobenius 更稳定，数值范围也更合理"""
-
-    s0 = CubieState.solved()
-    s2 = CubieState.solved().inverse()
-    print(s2)
-
-    env = Environment(model)
-
-
-    def far_targets(model, n=6):
-        targets = []
-        zs = []
-
-        while len(targets) < n:
-            s = CubieBase.generate_cubie(length=15)
-            z = model.project(s.vector)
-            z /= np.linalg.norm(z)
-            if all(np.linalg.norm(z - z0) > 5.0 for z0 in zs):
-                targets.append(z)
-                zs.append(z)
-            # if all(abs(np.dot(z, z0)) < 0.3 for z0 in zs):
-            #     targets.append(z)
-            #     zs.append(z)
-
-        return targets
-
-
-    s2 = env.big_cycle_state()
-    assert s2.is_solvable(), f'{s2}'
-    print(np.linalg.norm(s2.vector - s0.vector))  # 6.3245554
-    print(model.heuristic(s2.vector, s0.vector))  # 3.7416575,有很多 fast 成分
-    print(np.linalg.norm(model.project(s2.vector)))  # 4.582576
-    print(cosine_distance(model.project(s2.vector), model.project(s0.vector)))  # 0.75,慢空间投影的余弦相似度更高
-
-    s22 = env.inversed_state()
-    print(s22)
-    assert s22.is_solvable(), f'{s22}'
-    print(np.linalg.norm(s22.vector - s0.vector))  # 6.3245554
-    print(model.heuristic(s22.vector, s0.vector))  # 3.4641016
-    print(np.linalg.norm(model.project(s22.vector)))  # 4.582576
-    print(cosine_distance(model.project(s22.vector), model.project(s0.vector)))  # 0.25,慢空间投影的余弦距离更小
-
-    print(np.linalg.norm(s2.vector - s22.vector))  # 6.3245554
-    print(model.heuristic(s2.vector, s22.vector))  # 3.3166249
-
-    z0 = model.project(s0.vector)
-    for k, g in model.rho_slow.items():
-        z2 = g @ z0
-        print(k, model.l2_distance(z2, z0), cosine_distance(z2, z0))  # 0.75,慢空间投影的余弦相似度更高
-
-        """
-        单步是“离散能级壳层”
-        分层能级结构，slow space 里存在离散轨道壳层
-        z0 --(小扰动)--> 半径 ~0. cos_dist ≈ 0.0117
-        z0 --(中扰动)--> 半径 ~1.1 cos_dist ≈ 0.030
-        z0 --(大扰动)--> 半径 ~3.6 / 5.4 cos_dist ≈ 0.328
-        丢掉真实差异,波函数演化,离散“角度分层空间”,eps ≈ 0.1 ~ 0.2
-        """
-    print('------------')
-    for k, (g, *_) in model.rho_moves.items():
-        z2 = model.project(g.act(s0).vector)
-        print(k, model.l2_distance(z2, z0), cosine_distance(z2, z0))  # 0.75,慢空间投影的余弦相似度更高
-        """更接近真实动力学"""
-
-    s3 = env.twisted_state()
-    assert s3.is_solvable(), f'{s3}'
-    print(np.linalg.norm(s3.vector - s0.vector))  # 6.0
-    print(model.heuristic(s3.vector, s0.vector))  # 6.0 没有被谱压缩掉,能量几乎完全在 slow 模式里
-    print(np.linalg.norm(model.project(s3.vector)))
-    print(model.rho_slow.keys())
-
-    # commutators = [model.V_slow.T @ m.rho() @ model.V_slow for k, m in products2.items()]
-    targets = [model.project(s.vector) for s in (s0, s2, s3)]
-    for k in [(0, 1, 1), (1, 1, 1), (2, 1, 1)]:
-        g = model.rho_moves[k][0]
-        s = g.act(CubieState.solved())
-        z = model.project(s.vector)
-        targets.append(z)
-    print(len(targets))
-
-    z4 = env.generate_diff_target()
-    print(np.linalg.norm(z4 - z0))  # 6.461424
-
-    zs = []
-    while len(zs) < 100:
-        s = CubieBase.generate_cubie(length=20)
-        z = model.project(s.vector)
-        zs.append(np.linalg.norm(z - z0))
-
-    print(np.unique(np.round(zs, decimals=4), return_counts=True))  # 4.272...4.609772...7.745967...7.8422
-    print(np.mean(zs), np.std(zs))  # 6.490978+-0.54746604
-    """分布比较离散，但有明显的聚集，
-    距离分布：0.7 / 1.1 / 3.6 / 5.4 → 多步之后 → 收敛到“壳层混合带
-    → 距离失去区分能力，测度集中
-    用“欧式距离”做分类，但空间已经不支持,系统已经进入：mixing regime（混合态）
-    更像“量子态空间”，不是“欧氏空间”
-    """
-
-    # zs = []
-    # while len(zs) < 5000:
-    #     s = CubieBase.generate_cubie(length=random.randint(1,50))
-    #     z = model.project(s.vector)
-    #     zs.append(np.linalg.norm(z - z0))
-
-    # print(np.mean(zs),np.max(zs), np.std(zs))  # 5.923669 1.2852604/5.942547 1.263975/6.109492 1.1221024/6.135 1.0793229/6.1276927 1.0755162/6.14692 1.0529827
-    # print(len( np.unique(np.round(zs, decimals=4))))#179/191/172/177/207/220
-    # """6.1392093 8.291562 1.0900722/220"""
-
-    commutators = []
-
-    for k in products2.keys():
-        g, h = k[0], k[1]
-        Ug = model.rho_slow[g]
-        Uh = model.rho_slow[h]
-
-        Uc = Ug @ Uh @ Ug.conj().T @ Uh.conj().T
-
-        commutators.append(Uc)
-
-    # life = QuantumSimulation(model, commutators, n_agents=30)
-    #
-    # life.evolve(steps=100)
-    # life.plot()
-    #
-    # life.plot_world()
-    """
-    [0] purity=0.895 entropy=0.181 chaos=0.845 N=60
-    [10] purity=0.724 entropy=0.474 chaos=0.754 N=235
-    [20] purity=0.713 entropy=0.492 chaos=0.744 N=352
-    [30] purity=0.714 entropy=0.491 chaos=0.742 N=460
-    [40] purity=0.722 entropy=0.476 chaos=0.745 N=583
-    [50] purity=0.726 entropy=0.467 chaos=0.748 N=702
-    [60] purity=0.727 entropy=0.463 chaos=0.749 N=826
-    [70] purity=0.730 entropy=0.457 chaos=0.749 N=971
-    [80] purity=0.733 entropy=0.451 chaos=0.753 N=1131
-    [90] purity=0.735 entropy=0.446 chaos=0.753 N=1291
-    [100] purity=0.737 entropy=0.443 chaos=0.756 N=1451
-    [110] purity=0.738 entropy=0.440 chaos=0.754 N=1611
-    [120] purity=0.739 entropy=0.437 chaos=0.756 N=1771
-    purity ↓ entropy ↑ chaos 被锁定 N ↑ 爆炸增长
-    没有生态约束 系统在收敛到一个“单一分布族”
-    [0] purity=0.752 entropy=0.577 chaos=0.054 N=33
-    [10] purity=0.194 entropy=1.973 chaos=0.000 N=33
-    [20] purity=0.142 entropy=2.175 chaos=0.000 N=33
-    [30] purity=0.139 entropy=2.184 chaos=0.000 N=33
-    [40] purity=0.139 entropy=2.185 chaos=0.000 N=33
-    [50] purity=0.139 entropy=2.185 chaos=0.000 N=33
-    [60] purity=0.139 entropy=2.185 chaos=0.000 N=33
-    [70] purity=0.139 entropy=2.185 chaos=0.000 N=33
-    系统变成“热平衡态”非对易性被完全压制，量子相干性消失，所有 ρ 趋向对易/经典行为。
-    系统快速去相干 → 坍缩到经典混合态 → 失去量子特征
-    线性平均 + 对称性 + 无外源能量 = 必然均匀化  模拟热力学
-    """
-
-    world = HybridSimulation(env=env, n_agents=30)
-    world.evolve(steps=200, print_every=10, max_k=400)
-    world.plot_population()
-    world.plot_metrics()
-    world.plot_additional_metrics()
-    world.plot_phase()
-    world.plot_flow()
-    world.plot_interaction()
-
-    """
-    [  0] purity=0.780  energy=33.84  chaos=3.000  species=19  N=32
-    [ 10] purity=0.337  energy=39.81  chaos=2.967  species=38  N=52
-    [ 20] purity=0.318  energy=41.33  chaos=2.784  species=43  N=77
-    [ 30] purity=0.324  energy=40.68  chaos=2.719  species=49  N=93
-    [ 40] purity=0.315  energy=42.00  chaos=2.705  species=53  N=125
-    [ 50] purity=0.323  energy=42.00  chaos=2.742  species=56  N=154
-    [ 60] purity=0.315  energy=42.00  chaos=2.840  species=62  N=192
-    [ 70] purity=0.322  energy=41.17  chaos=2.811  species=63  N=200
-    [ 80] purity=0.310  energy=41.21  chaos=2.757  species=63  N=197
-    [ 90] purity=0.302  energy=41.72  chaos=2.766  species=61  N=200
-    
-    [  0] purity=0.762  energy=36.54  chaos=3.055  species=21  N=31
-    [ 10] purity=0.293  energy=41.02  chaos=2.860  species=24  N=41
-    [ 20] purity=0.267  energy=40.10  chaos=2.927  species=33  N=49
-    [ 30] purity=0.273  energy=41.56  chaos=2.871  species=39  N=50
-    [ 40] purity=0.293  energy=41.90  chaos=2.720  species=33  N=56
-    [ 50] purity=0.271  energy=41.92  chaos=2.847  species=39  N=59
-    [ 60] purity=0.273  energy=42.59  chaos=2.798  species=38  N=62
-    [ 70] purity=0.272  energy=41.62  chaos=2.673  species=42  N=67
-    [ 80] purity=0.275  energy=42.06  chaos=2.761  species=45  N=74
-    [ 90] purity=0.280  energy=41.65  chaos=2.802  species=42  N=81
-
-    [  0] obs={'purity_mean': '0.726', 'energy_mean': '18.887', 'chaos_mean': '0.054', 'resource_mean': '1.231', 'resource_std': '0.358', 'suitability_mean': '0.726', 'plan_entropy_mean': '0.000', 'rho_divergence_mean': '0.021', 'pref_diversity': '0.064', 'n_agents': '30.000', 'species': '16.000'} K=38
-    [ 10] obs={'purity_mean': '0.673', 'energy_mean': '19.305', 'chaos_mean': '0.099', 'resource_mean': '2.372', 'resource_std': '1.330', 'suitability_mean': '0.575', 'plan_entropy_mean': '0.367', 'rho_divergence_mean': '1.018', 'pref_diversity': '0.070', 'n_agents': '40.000', 'species': '1.000'} K=54
-    [ 20] obs={'purity_mean': '0.682', 'energy_mean': '19.007', 'chaos_mean': '0.110', 'resource_mean': '3.334', 'resource_std': '1.503', 'suitability_mean': '0.517', 'plan_entropy_mean': '0.778', 'rho_divergence_mean': '0.952', 'pref_diversity': '0.074', 'n_agents': '55.000', 'species': '1.000'} K=78
-    [ 30] obs={'purity_mean': '0.709', 'energy_mean': '18.812', 'chaos_mean': '0.271', 'resource_mean': '3.655', 'resource_std': '2.004', 'suitability_mean': '0.481', 'plan_entropy_mean': '0.805', 'rho_divergence_mean': '0.811', 'pref_diversity': '0.082', 'n_agents': '87.000', 'species': '7.000'} K=110
-    [ 40] obs={'purity_mean': '0.715', 'energy_mean': '18.408', 'chaos_mean': '0.231', 'resource_mean': '3.934', 'resource_std': '2.567', 'suitability_mean': '0.492', 'plan_entropy_mean': '0.834', 'rho_divergence_mean': '0.803', 'pref_diversity': '0.086', 'n_agents': '116.000', 'species': '7.000'} K=150
-    [ 50] obs={'purity_mean': '0.696', 'energy_mean': '18.603', 'chaos_mean': '0.165', 'resource_mean': '4.047', 'resource_std': '2.489', 'suitability_mean': '0.487', 'plan_entropy_mean': '0.902', 'rho_divergence_mean': '0.845', 'pref_diversity': '0.088', 'n_agents': '158.000', 'species': '3.000'} K=198
-    [ 60] obs={'purity_mean': '0.708', 'energy_mean': '18.437', 'chaos_mean': '0.206', 'resource_mean': '4.079', 'resource_std': '2.790', 'suitability_mean': '0.481', 'plan_entropy_mean': '0.885', 'rho_divergence_mean': '0.816', 'pref_diversity': '0.090', 'n_agents': '210.000', 'species': '7.000'} K=254
-    [ 70] obs={'purity_mean': '0.727', 'energy_mean': '18.229', 'chaos_mean': '0.282', 'resource_mean': '3.733', 'resource_std': '2.610', 'suitability_mean': '0.490', 'plan_entropy_mean': '0.754', 'rho_divergence_mean': '0.778', 'pref_diversity': '0.092', 'n_agents': '280.000', 'species': '12.000'} K=318
-    [ 80] obs={'purity_mean': '0.748', 'energy_mean': '17.894', 'chaos_mean': '0.244', 'resource_mean': '3.588', 'resource_std': '2.694', 'suitability_mean': '0.518', 'plan_entropy_mean': '0.643', 'rho_divergence_mean': '0.761', 'pref_diversity': '0.096', 'n_agents': '344.000', 'species': '9.000'} K=390
-    [ 90] obs={'purity_mean': '0.770', 'energy_mean': '17.573', 'chaos_mean': '0.235', 'resource_mean': '3.619', 'resource_std': '2.603', 'suitability_mean': '0.533', 'plan_entropy_mean': '0.574', 'rho_divergence_mean': '0.728', 'pref_diversity': '0.097', 'n_agents': '424.000', 'species': '9.000'} K=470
-    """
-
-    world = BalanceWorld(model)
-    life = RubikLife(model=model, n_agents=50)
-
-    # 演化 200 代
-    for gen in range(500):
-        life.step(T=1.0)  # T 可以随时间变化
-        if gen % 20 == 0:
-            print(
-                f"Gen {gen}: Population = {len(life.agents)}, Mean distance = {np.mean([life.energy(a.state) for a in life.agents]):.2f}")
-            Z = life.population_history[-1]
-
-            if Z.shape[1] > 2:
-                Z = Z[:, :2]
-
-            plt.figure(figsize=(6, 6))
-
-            plt.scatter(Z[:, 0].real, Z[:, 1].real, s=30, alpha=0.7)
-
-            plt.title(f"Rubik Life | population={len(Z)}")
-            plt.xlabel("slow dim 1")
-            plt.ylabel("slow dim 2")
-
-            plt.show()
-    # 可视化
-    life.plot_population(n_last=50)  # 慢流形上的种群演化
-    life.plot_population_size()  # 种群数量变化
-
-    chaos_state = CubieBase.generate_cubie(length=30)
-    world.chaos_pan.append((chaos_state, world.energy(chaos_state)))
-
-    world.evolve(steps=200, temperature=1.5)
-
-    world.plot_history()
-
-    traj = world.anneal(steps=2000, T0=5.0, cooling_rate=0.999)
-
-    fig, ax1 = plt.subplots(figsize=(12, 8))
-    ax1.plot(traj, label='Distance to solved (slow coord)', linewidth=2)
-    ax1.set_ylabel('||z - z_solved||')
-    ax1.legend(loc='upper left')
-
-    ax2 = ax1.twinx()
-    temps = [5.0 * (0.999 ** i) for i in range(2000)]
-    ax2.plot(temps, 'r--', label='Temperature', alpha=0.7)
-    ax2.set_ylabel('Temperature')
-    ax2.legend(loc='upper right')
-
-    plt.title('Annealing Trajectory (T from 5.0 → ~0)')
-    plt.grid(True, alpha=0.3)
-    # plt.legend()
-    plt.savefig('data/Annealing Trajectory with Temperature Overla.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-    plt.figure(figsize=(12, 6))
-    for T0 in [3.0, 5.0, 8.0]:  # 多条退火曲线对比
-        traj = world.anneal(steps=2000, T0=T0, cooling_rate=0.999)
-        plt.plot(traj, label=f'T0={T0}')
-    plt.xlabel('Step')
-    plt.ylabel('Distance to solved')
-    plt.title('Annealing Trajectories with Different Starting Temperatures')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig('data/Annealing Trajectories with Different Starting Temperatures.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-    """完整退火轨迹（T from 5.0 → ~0）
-    关键观察：
-
-    早期 (0–500 步)：距离剧烈波动（峰值到 6.0+，谷底到 2.0），对应高温混沌探索。
-    中期 (500–1500 步)：波动幅度逐渐减小，距离在 2.0–3.5 区间震荡，系统开始“冷却”。
-    后期 (1500–2000 步)：出现几次“跳水”（从 3.0+ 掉到 0–1.0），最终稳定在 ≈0–1.5 → 成功冻结到低能量态（接近 solved）。
-
-    结论：退火过程成功实现了“从混乱到秩序”的转变：高温下探索广阔空间，中温下动态平衡，低温下冻结到低能量盆地。这正是模拟退火的经典行为，也验证了退火机制下能涌现从无序到有序的相变。
-    """
-
-    # 温度实验
-    temps = np.linspace(0.1, 5.0, 20)
-    results = []
-    for T in temps:
-        world = BalanceWorld(model)
-
-        world.evolve(steps=500, temperature=T)
-
-        obs = world.observe()
-
-        results.append((T, obs["order_mean"], obs["chaos_mean"]))
-
-    T_values = [r[0] for r in results]
-    order_means = [r[1] for r in results]
-    chaos_means = [r[2] for r in results]
-
-    plt.figure(figsize=(12, 6))
-
-    # 双轴图：总趋势
-    ax1 = plt.gca()
-    ax1.plot(T_values, order_means, 'b-o', label='Order Mean Energy', linewidth=2.5, markersize=6)
-    ax1.plot(T_values, chaos_means, 'r-s', label='Chaos Mean Energy', linewidth=2.5, markersize=6)
-    ax1.set_xlabel('Temperature T')
-    ax1.set_ylabel('Mean Energy per State (d²)')
-    ax1.set_title('Final Balance State vs Temperature (after 500 steps)')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc='upper left')
-
-    # 额外：画 order - chaos 差值（平衡程度）
-    ax2 = ax1.twinx()
-    imbalance = np.array(order_means) - np.array(chaos_means)
-    ax2.plot(T_values, imbalance, 'k--', label='Order - Chaos Difference', linewidth=1.5, alpha=0.7)
-    ax2.axhline(0, color='gray', linestyle='--', alpha=0.5)
-    ax2.set_ylabel('Imbalance (Order - Chaos)')
-    ax2.legend(loc='upper right')
-
-    plt.tight_layout()
-    plt.savefig('data/Final Balance State vs Temperature.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-    """
-    温度扫描图（Final Balance State vs Temperature）
-    关键观察：
-
-    低温区 (T ≈ 0.1–1.0)：Order Mean ≈ 20–25，Chaos Mean ≈ 0–5 → 秩序主导（低能量状态占优）。
-    中温区 (T ≈ 1.0–3.0)：两者快速接近，Order Mean ≈ 25–28，Chaos Mean ≈ 25–28 → 动态平衡（天平最稳定）。
-    高温区 (T ≈ 3.0–5.0)：Chaos Mean ≈ 28–30，Order Mean ≈ 27–28 → 混乱轻微占优，但差距不大。
-    Imbalance (Order - Chaos)：从正值（低温秩序重）→ 零附近波动（中温平衡）→ 负值（高温混乱重），呈现明显的“相变”特征。
-    """
-
-    traj = []  # diffusion 实验
-    state = CubieState.solved()
-    z0 = world.slow_coord(state)
-
-    for t in range(500):
-        state, _ = world.metropolis_step(state, temperature=1.0)
-        z = world.slow_coord(state)
-        traj.append(np.linalg.norm(z - z0))
-
-    plt.figure(figsize=(12, 6))
-
-    # 主轨迹
-    t = np.arange(len(traj))
-    plt.plot(t, traj, 'b-', label='Distance ||z(t) - z(0)||', linewidth=1.8, alpha=0.9)
-
-    # 加 √t 参考线（验证扩散几何）
-    sqrt_t = np.sqrt(t) * np.mean(traj[50:100]) / np.mean(np.sqrt(np.arange(50, 100)))  # 粗拟合
-    plt.plot(t, sqrt_t, 'r--', label='≈ √t (diffusion theory)', linewidth=2, alpha=0.7)
-
-    # 加指数饱和参考线（对比混沌）
-    saturation = np.mean(traj[-50:])
-    plt.axhline(saturation, color='green', linestyle='--', label=f'Saturation level ≈ {saturation:.2f}')
-
-    plt.xlabel('Metropolis Steps (T=1.0)')
-    plt.ylabel('Slow Manifold Distance to Initial State')
-    plt.title('Diffusion Trajectory on Slow Manifold (Single Metropolis Walk)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig('data/Diffusion Trajectory on Slow Manifold.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    """Metropolis 扩散轨迹（T=1.0，500 步）
-    关键观察：
-
-    早期 (0–100 步)：距离从 0 快速上升到 ≈1.5–2.0，呈阶梯状（跳跃后平台），早期增长近似 √t（红色虚线）。
-    中期 (100–400 步)：距离在 ≈2.0–3.0 区间大幅波动（峰值到 3.0+，谷底到 1.5），没有明显饱和。
-    后期 (400–500 步)：波动持续，但幅度略减，稳定在 ≈2.5–3.0 附近（绿色饱和线 ≈2.64）。
-
-    结论：在 T=1.0（中等温度）下，单条 Metropolis 轨迹表现出典型的扩散几何（早期 √t 增长 + 随机波动），但没有快速饱和，说明慢流形仍有足够“空间”让状态探索，而不是立即混沌化。这与 edge block 的快速饱和形成鲜明对比，进一步印证 slow manifold 具有扩散性质。
-    """
-
-    print("开始生成随机状态对并计算距离...")
-    n_pairs = 5000
-    CubieBase.build_pruning_table()
-
-    d1_list = []
-    d2_list = []
-    stateA = CubieState.solved()
-
-    for i in range(n_pairs):
-        if i % 500 == 0:
-            print(f"已处理 {i}/{n_pairs} 对...")
-
-        # stateA, stateB = CubieBase.generate_cubie_pair(depth_range=(5, 22))
-        # 真实近似深度
-        # stateC = CubieMove.relative_state(stateA, stateB)
-        steps = random.randint(1, 30)
-        g = CubieBase.random_walk(length=steps)
-        stateB = g.act(stateA)
-
-        phase, d1 = CubieBase.cubie_distance(stateB)
-        # hybrid_d = d1 + α * phase
-        # 慢投影距离
-        # delta_rho = stateC.vector
-        d2 = model.heuristic(stateA.vector, stateB.vector, False)
-
-        d1_list.append(d1)
-        d2_list.append(d2)
-
-    # 转换为 numpy 数组
-    d1_arr = np.array(d1_list)
-    d2_arr = np.array(d2_list)
-
-    # 计算相关系数
-    pearson_corr, pearson_p = pearsonr(np.log(d1_arr + 1), d2_arr)
-    spearman_corr, spearman_p = spearmanr(d1_arr, d2_arr)
-
-    print(f"\n相关系数结果：")
-    print(f"Pearson 相关系数: {pearson_corr:.4f} (p-value: {pearson_p:.2e})")
-    print(f"Spearman 秩相关系数: {spearman_corr:.4f} (p-value: {spearman_p:.2e})")
-    print("std d1", np.std(d1_arr), "std d2", np.std(d2_arr))
-    # 画散点图
-    plt.figure(figsize=(12, 8))
-    plt.scatter(np.log(d1_arr + 1), d2_arr, alpha=0.6, s=10, c='blue', edgecolor='none')
-    plt.xlabel("prune heuristic 真实距离 d1 log")
-    plt.ylabel("慢投影距离 d2 = ||V_slowᵀ (ρ(A) - ρ(B))||")
-    plt.title(f"慢投影距离 vs 真实距离 (n={n_pairs} 对)")
-    plt.grid(True, alpha=0.3)
-
-    # 添加相关系数文本
-    plt.text(0.05, 0.95, f"Pearson r = {pearson_corr:.4f}\nSpearman r = {spearman_corr:.4f}",
-             transform=plt.gca().transAxes, fontsize=12, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    plt.tight_layout()
-    plt.savefig(f"data/慢投影距离_真实距离.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    depth = (5, 10, 20, 30)
-
-    for dh in depth:
-        d1_list = []
-        d2_list = []
-        for i in range(n_pairs):
-            if i % 500 == 0:
-                print(f"已处理 {i}/{n_pairs} 对...")
-
-            # stateA, stateB = CubieBase.generate_cubie_pair(depth_range=(18, 22))
-            stateA = CubieBase.generate_cubie(dh)
-            stateB = CubieBase.generate_cubie(dh)
-            # 真实近似深度
-            stateC = CubieMove.relative_state(stateA, stateB)
-
-            phase, d1 = CubieBase.cubie_distance(stateC)
-            # hybrid_d = d1 + α * phase
-            # 慢投影距离
-            # delta_rho = stateC.vector
-            d2 = model.heuristic(stateA.vector, stateB.vector, False)
-            # z = z_delta[mask_nc].real
-            # weights = 1 / (1 - w_nc)
-            # d2 = np.sqrt(np.sum((z ** 2) * weights))  # np.abs(z)
-
-            d1_list.append(d1)
-            d2_list.append(d2)
-
-        # 转换为 numpy 数组
-        d1_arr = np.array(d1_list)
-        d2_arr = np.array(d2_list)
-
-        # 计算相关系数
-        pearson_corr, pearson_p = pearsonr(np.log(d1_arr + 1), d2_arr)
-        spearman_corr, spearman_p = spearmanr(d1_arr, d2_arr)
-
-        print(f"\n{dh}相关系数结果：")
-        print(f"Pearson 相关系数: {pearson_corr:.4f} (p-value: {pearson_p:.2e})")
-        print(f"Spearman 秩相关系数: {spearman_corr:.4f} (p-value: {spearman_p:.2e})")
-        print("std d1", np.std(d1_arr), "std d2", np.std(d2_arr))
-        """
-        dh 随机0-30：
-        Pearson 相关系数: 0.5081 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.3636 (p-value: 3.56e-156)
-        slow manifold 捕捉到了宏观难度
-        10相关系数结果：
-        Pearson 相关系数: 0.2480 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.1743 (p-value: 2.04e-35)
-        std d1 0.7793588133844385 std d2 0.6538328
-        20相关系数结果：
-        Pearson 相关系数: 0.0622 (p-value: 1.07e-05)
-        Spearman 秩相关系数: 0.0541 (p-value: 1.29e-04)
-        30相关系数结果：
-        Pearson 相关系数: 0.0291 (p-value: 3.97e-02)
-        Spearman 秩相关系数: 0.0270 (p-value: 5.61e-02)
-        std d1 0.6713896037324378 std d2 0.5729763
-    
-        Pearson 相关系数: 0.5968 (p-value: 0.00e+00)
-        Spearman 秩相关系数: 0.2613 (p-value: 7.38e-79)
-        corr = corrcoef(
-        cube_distance(A,B),
-        slow_distance(A,B)
-    
-        Rubik 群的随机游走在大约：15 ~ 20 moves 后就会接近 混合状态。
-        slow manifold 对“远距离状态”区分能力下降
-        slow spectral embedding ≈ 局部搜索结构
-        10 步以内影响巨大,小深度区域：state space 非常稀疏
-        """
-
-        # 画散点图
-        plt.figure(figsize=(12, 8))
-        plt.scatter(np.log(d1_arr + 1), d2_arr, alpha=0.6, s=10, c='blue', edgecolor='none')
-        plt.xlabel("prune heuristic 真实距离 d1 log")
-        plt.ylabel("慢投影距离 d2 = ||V_slowᵀ (ρ(A) - ρ(B))||")
-        plt.title(f"慢投影距离 vs 真实距离 (d={dh} n={n_pairs} 对)")
-        plt.grid(True, alpha=0.3)
-
-        # 添加相关系数文本
-        plt.text(0.05, 0.95, f"Pearson r = {pearson_corr:.4f}\nSpearman r = {spearman_corr:.4f}",
-                 transform=plt.gca().transAxes, fontsize=12, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        plt.tight_layout()
-        plt.savefig(f"data/慢投影距离_真实距离_d{dh}.png", dpi=300, bbox_inches='tight')
-        plt.show()
-
-    d_ratios = []
-    rho_solved = CubieState.solved().vector  # 或 solved.to_rho()，取决于你用的是 vec 还是 rho
-    z_solved = model.project(rho_solved)
-    for _ in range(1000):
-        # 随机 g（从 moves 中随机走几步）
-        A = CubieBase.generate_cubie()
-        rho_A = A.vector
-        z_A = model.project(rho_A)
-
-        g = CubieBase.random_walk(length=5)  # 短路径随机 g
-        # g.act(A).vector
-        rho_g = g.rho()
-
-        # 变换后状态
-        rho_A_g = rho_g @ rho_A
-        z_A_g = model.project(rho_A_g)
-
-        # 原距离 vs 变换后距离
-        d_orig = model.l2_distance(z_A, z_solved)
-        d_trans = model.l2_distance(z_A_g, z_solved)
-
-        ratio = d_trans / (d_orig + 1e-10)  # 避免除 0
-        d_ratios.append(ratio)
-
-    # 统计
-    mean_ratio = np.mean(d_ratios)
-    std_ratio = np.std(d_ratios)
-    print(f"平均 d(ρ(g)x, ρ(g)y) / d(x,y) = {mean_ratio:.4f} ± {std_ratio:.4f}")
-    """平均 d(ρ(g)x, ρ(g)y) / d(x,y) = 1.0059 ± 0.0871
-    slow embedding 在群作用下是否等距:满足：统计等距 (statistical isometry)
-    而不是严格等距 (exact isometry)
-    说明 d(z) 对群变换鲁棒，可作为可靠的到 solved 距离代理。
-    慢投影距离 d(z) 在群作用下具有准等距性（quasi-isometry），即
-    d(ρ(g)x, ρ(g)y) ≈ d(x,y)
-    误差仅在 ±8–9% 内波动，远小于随机扰动或非对称表示常见的 30–50% 偏差。这说明：
-    慢子空间基本保留了群作用的几何结构（距离关系）。
-    d(z) 可以作为到 solved 的可靠下界或代理距离（admissible heuristic），用于 A*/IDA* 搜索。
-    """
-
-    # 画分布
-    plt.figure(figsize=(12, 8))
-    plt.hist(d_ratios, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black')
-    plt.axvline(1.0, color='red', ls='--', label='理想保距 (ratio=1)')
-    plt.axvline(mean_ratio, color='orange', ls='-', label=f'平均比率 {mean_ratio:.4f}')
-    plt.xlabel("比率 d_trans / d_orig")
-    plt.ylabel("密度")
-    plt.title("慢投影距离在群作用下的保距性分布 (1000 次采样)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("data/慢投影距离在群作用下的保距性分布.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    d_ratios = []
-    for _ in range(3000):
-        A, B = CubieBase.generate_cubie_pair()
-
-        rho_A = A.vector
-        rho_B = B.vector
-
-        z_A = model.project(rho_A)
-        z_B = model.project(rho_B)
-
-        g = CubieBase.random_walk(length=5)
-        rho_g = g.rho()
-
-        z_A_g = model.project(rho_g @ rho_A)
-        z_B_g = model.project(rho_g @ rho_B)
-
-        d_orig = model.l2_distance(z_A, z_B)
-        d_trans = model.l2_distance(z_A_g, z_B_g)
-
-        ratio = d_trans / (d_orig + 1e-10)
-        d_ratios.append(ratio)
-
-    mean_ratio = np.mean(d_ratios)
-    std_ratio = np.std(d_ratios)
-    print(f"平均 d(ρ(g)x, ρ(g)y) / d(x,y) = {mean_ratio:.4f} ± {std_ratio:.4f}")
-    """平均 d(ρ(g)x, ρ(g)y) / d(x,y) = 1.0003 ± 0.0144"""
-
-    plt.figure(figsize=(12, 8))
-    plt.hist(d_ratios, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black')
-    plt.axvline(1.0, color='red', ls='--', label='理想保距 (ratio=1)')
-    plt.axvline(mean_ratio, color='orange', ls='-', label=f'平均比率 {mean_ratio:.4f}')
-    plt.xlabel("比率 d_trans / d_orig")
-    plt.ylabel("密度")
-    plt.title("群作用是否保持 slow metric (3000 次采样 近似保距)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("data/slow 投影下的距离近似保距.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    """
-    slow manifold 上的群作用几乎是正交的，因此 slow embedding 近似保持 Rubik cube 的群距离结构
-    近似群不变的
-    slow embedding respects group action.
-    """
+    main()
