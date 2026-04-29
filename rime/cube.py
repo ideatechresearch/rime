@@ -657,12 +657,12 @@ class CubeBase:
         face = best_face
 
         normal, u_dir, v_dir = cls.face_basis(face)
-        u = np.dot(pos, u_dir)
-        v = np.dot(pos, v_dir)
+        u = np.dot(pos, u_dir)  # projection onto row direction
+        v = np.dot(pos, v_dir)  # projection onto col direction
 
         center = (n - 1) / 2.0
-        c = int(round(u + center))
-        r = int(round(v + center))
+        r = int(round(u + center))  # u_dir → row
+        c = int(round(v + center))  # v_dir → col
         if not (0 <= r < n and 0 <= c < n):
             raise ValueError(f"out of face: {face}, r={r}, c={c}")
 
@@ -1289,24 +1289,42 @@ class CubeBase:
             print(f"接近万向节锁! ay={ay} 接近 ±90°")
         return Rz @ Ry @ Rx  # 从右向左执行，实际顺序是 X -> Y -> Z
 
-    @class_property('SO_3_ROT')
-    def generate_rotations(cls) -> list[np.ndarray]:
-        """生成所有：3x3 正交矩阵，直接用于坐标变换,24 个 SO(3) 旋转"""
+    @class_property('ROTATION_MATRICES')
+    def rotation_matrices(cls) -> np.ndarray:
+        """
+        生成所有：3x3 正交矩阵，直接用于坐标变换,24 个 SO(3) 旋转
+        立方体的 24 个旋转矩阵 (SO(3) 部分, det = +1)
+        """
         # rot_x_90 = CubeBase.rot90_matrix(0, 1)
         # rot_y_90 = CubeBase.rot90_matrix(1, 1)
         # rot_z_90 = CubeBase.rot90_matrix(2, 1)
         # R = rz @ ry @ rx
         mats = []
         import itertools
-        for perm in itertools.permutations([0, 1, 2]):
+        for perm in itertools.permutations(range(3)):
             for signs in itertools.product([-1, 1], repeat=3):
-                M = np.zeros((3, 3), dtype=int)
-                for i in range(3):
-                    M[i, perm[i]] = signs[i]
-                if np.linalg.det(M) == 1:  # and np.allclose(M @ M.T, np.eye(3))
+                M = np.zeros((3, 3), dtype=np.int8)
+                for i, j in enumerate(perm):
+                    M[i, j] = signs[i]
+                if abs(np.linalg.det(M) - 1.0) < 1e-8 and np.allclose(M @ M.T, np.eye(3), atol=1e-8):
                     mats.append(M)
 
-        return mats  # 24 个
+        mats.sort(key=lambda M: -int(np.linalg.det(M)))
+        return np.array(mats)  # 24 个
+
+    @class_property('SYMMETRY_MATRICES')
+    def symmetry_matrices(cls) -> np.ndarray:
+        """
+        生成完整的 48 个立方体对称矩阵（24 旋转 + 24 镜像）
+        每个矩阵 M: 3×3 带符号置换矩阵, det = ±1
+        """
+        rot_mats = cls.rotation_matrices  # (24, 3, 3)
+        mirror = np.diag(np.array([1, 1, -1], dtype=np.int8))
+        sym_mats = []
+        for R in rot_mats:
+            sym_mats.append(R)
+            sym_mats.append(mirror @ R)  # 镜像版本
+        return np.array(sym_mats)  # shape: (48, 3, 3)
 
     @classmethod
     def apply_rotation(cls, state: np.ndarray, R: np.ndarray):
@@ -1328,9 +1346,8 @@ class CubeBase:
                 new_state[new_f, new_r, new_c] = state[fidx, r, c]
         return new_state
 
-
     @classmethod
-    def normalize_align(cls, state: np.ndarray,max_depth:int = 8):
+    def normalize_align(cls, state: np.ndarray, max_depth: int = 8):
         """
         使用 BFS 遍历 layer=0 旋转，使 U 和 F 面中心对齐
         角块保持不动
@@ -1375,6 +1392,55 @@ class CubeBase:
                     q.append((new_state, move_list + [move]))
 
         raise ValueError("无法对齐 U/F 面")
+
+    @class_property('SYMMETRY_INVERSE_ID')
+    def symmetry_inverse_id(cls) -> np.ndarray:
+        """symmetry_inverse_id[i] = j 表示第 i 个对称的逆是第 j 个"""
+        mats = cls.symmetry_matrices
+        inv = np.zeros(48, dtype=np.int8)
+        for i, M in enumerate(mats):
+            MT = M.T
+            for j, N in enumerate(mats):
+                if np.array_equal(MT, N):
+                    inv[i] = j
+                    break
+        return inv
+
+    @classmethod
+    def apply_symmetry(cls, state: np.ndarray, sym_id: int) -> np.ndarray:
+        """将第 sym_id 种对称操作作用于贴纸状态 (6, n, n)"""
+        M = cls.symmetry_matrices[sym_id]  # (3, 3)
+        n = state.shape[1]
+        mid = (n - 1) / 2.0
+        new_state = np.zeros_like(state)
+
+        for old_fidx in range(6):
+            old_face = cls.FACES[old_fidx]
+            normal_old = cls.face_normal[old_face]
+            normal_new = M @ normal_old
+            # 通过法向量匹配找到新面
+            new_fidx = None
+            for fidx, face in enumerate(cls.FACES):
+                if np.array_equal(normal_new, cls.face_normal[face]):
+                    new_fidx = fidx
+                    break
+            assert new_fidx is not None, f'sym {sym_id}: face {old_face} normal not matched'
+            # 计算面内 2D 变换: (dr, dc) -> (dr_new, dc_new)
+            # pos_new = M @ pos_old  ⇒  u_new·dr_new + v_new·dc_new = Mu·dr + Mv·dc
+            _, u_old, v_old = cls.face_basis(old_face)
+            _, u_new, v_new = cls.face_basis(cls.FACES[new_fidx])
+            Mu, Mv = M @ u_old, M @ v_old
+            a, b = np.dot(Mu, u_new), np.dot(Mv, u_new)  # dr 的 u_new 分量 + dc 的 u_new 分量
+            c, d = np.dot(Mu, v_new), np.dot(Mv, v_new)  # dr 的 v_new 分量 + dc 的 v_new 分量
+            # 应用变换到每个贴纸
+            for r in range(n):
+                for col in range(n):
+                    dr, dc = r - mid, col - mid
+                    r_new = int(round(mid + a * dr + b * dc))
+                    c_new = int(round(mid + c * dr + d * dc))
+                    if 0 <= r_new < n and 0 <= c_new < n:
+                        new_state[new_fidx, r_new, c_new] = state[old_fidx, r, col]
+        return new_state
 
     @class_cache(key=lambda face, n: (face, n))
     @classmethod
@@ -1663,11 +1729,42 @@ class ActionToken:
         return hash(self.key)
 
     def __str__(self) -> str:
+        """标准魔方记法，与 transform() 互逆:
+        外层: U/U'/U2, R/R'/R2, F/F'/F2, D/D'/D2, L/L'/L2, B/B'/B2
+        中心层: M/M'/M2, E/E'/E2, S/S'/S2
+        宽层: 2Rw/2Rw'/2Rw2 等
+        """
+        if self.direction == 0:
+            return 'I'  # identity
         dir_norm = self.direction % 4
-        move_str = f"{['U', 'F', 'R'][self.axis]}{self.layer:+d}{dir_norm:+d}"
-        if dir_norm == 2: move_str = move_str[:-2] + "2"
-        if dir_norm == 3: move_str = move_str[:-2] + "'"
-        return move_str
+        pos_face, neg_face = CubeBase.AXIS_FACE[self.axis]
+        # 判断 layer 属于哪个面 (基于 n=3 的约定: mid=1, layer=±1/0)
+        # 对于一般 n: |layer| == mid → 外层, layer=0 → 中心层, 其他 → 宽层
+        n_est = max(3, abs(self.layer) * 2 + 1)  # 从 |layer| 估算 n
+        mid = n_est // 2
+        is_outer = abs(self.layer) == mid
+
+        if is_outer:
+            face = pos_face if self.layer > 0 else neg_face
+        elif self.layer == 0:
+            face = ['M', 'E', 'S'][self.axis]
+        else:  # 宽层: |layer| < mid → 从正面算起第 (mid - |layer|) 层 = width
+            width = mid - abs(self.layer) if self.layer > 0 else abs(self.layer) + mid - n_est + 1
+            # 简化: 用 layer 偏移表示
+            face_char = pos_face if self.layer > 0 else neg_face
+            suffix = '2' if dir_norm == 2 else ("'" if dir_norm == 3 else '')
+            return f"{abs(self.layer)}{face_char}w{suffix}"
+
+        # direction: +1 → face, -1(≡3) → face', 2 → face2
+        if dir_norm == 2:
+            return f"{face}2"
+        elif dir_norm == 3:
+            return f"{face}'"
+        else:
+            return face
+
+    def __repr__(self) -> str:
+        return f"ActionToken({self})"
 
     @staticmethod
     def invert_moves(moves: list['ActionToken']) -> list['ActionToken']:
@@ -1841,7 +1938,7 @@ class StickerCube(CubeBase):
         assert -self.mid <= layer <= self.mid, f"layer out of range: {layer}"
         self.rotate_core(self.cube, axis, layer, direction)
 
-    def normalize(self)-> list[tuple]:
+    def normalize(self) -> list[tuple]:
         # self.cube = self.normalize_sticker(self.cube)
         self.cube, path = self.normalize_align(self.cube)
         return path

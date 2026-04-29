@@ -391,8 +391,8 @@ class SlowDynamics:
         ])  # (456, 456) 实矩阵表示复线性变换
         """
         self.rho_moves = rho_moves or self.rho_moves(n)
-        rho_gen = [rho for _, rho, *_ in self.rho_moves.values()]
-        self.A_micro = sum(rho_gen) / len(rho_gen)  # 微时间算子, 群随机游走算子,生成元平均算子,反映群作用的整体能量层级
+        rho_gen = [rho.astype(np.complex128) for _, rho, *_ in self.rho_moves.values()]
+        self.A_micro = np.array(sum(rho_gen) / len(rho_gen), dtype=np.complex128)  # 微时间算子, 群随机游走算子,生成元平均算子,反映群作用的整体能量层级
         _, s, _ = np.linalg.svd(np.stack([A.reshape(-1) for A in rho_gen]), full_matrices=False)
         self.dim_algebra = np.sum(s > tol)
         assert np.allclose(self.A_micro, self.A_micro.T, rtol=tol, atol=tol), "矩阵不对称"
@@ -482,7 +482,20 @@ class SlowDynamics:
         - ... (其他 n 如 9,8,6,4,3,2)
 
         返回：{move_key: rho_matrix} 字典
+
+        普适谱定律并非普适成立。 在 10 个生成元计数中的验证表明：
+        生成元	Hermitian	有理谱？
+        18, 12, 10, 6, 2	是	是 — λ = k/m
+        16, 8	是	否 — 出现无理数！
+        9, 4, 3	否	否
+        原因：$n=8$（排除轴1和dir2）和 $n=16$（排除U2/D2）打破了"面完整性"——如果包含某个(轴, 面)对，则其所有3个方向必须全部存在，否则会产生无理特征值。
+        结构必须“对称到可以做平均”，平均之后只剩“计数问题”（整数）
         """
+        if n > 18:
+            all_moves = CubieMove.prim_moves().copy()
+            if n == 21:
+                all_moves.update(CubieMove.slice_moves())
+                return {k: (mv, mv.rho(), mv.matrix) for k, mv in all_moves.items()}
         f = {18: lambda k: True,
              16: lambda k: not (k[0] == 0 and k[2] == 2),
              12: lambda k: k[2] != 2,  # 标准 face-turn
@@ -930,7 +943,7 @@ class SlowDynamics:
             → 极易进入 orbit / 绕圈
 
         ================================
-        7. 一句话总结
+        7. 总结
         ================================
 
         魔方慢流形不是连续优化问题，
@@ -940,7 +953,7 @@ class SlowDynamics:
         本函数的作用：
             提供一个“近似排序信号”，而不是精确物理能量
 
-
+        对称性导致有效自由度降低，流体“冻结”成了具有周期性的结构。
         The system is governed by a global L2 potential, locally guided by geometric derivatives in the far regime, and stabilized by symmetry-breaking trajectory terms in the near-target regime, where continuous dynamics collapse into discrete group orbits.
         """
         Uz = np.einsum('nij,j->ni', self.U, z)  # (n,d)
@@ -954,7 +967,7 @@ class SlowDynamics:
         radial = np.real(np.einsum('ni,i->n', np.conj(dz), tz_unit))  # 投影到径向方向
         tangential = np.linalg.norm(dz - np.outer(radial, tz_unit), axis=1)  # 切向分量（垂直于径向）
         #  全局 backbone：L2 距离（E_base）
-        E_base = np.linalg.norm(Uz - target, axis=1)  # distance L2 主干
+        E_base = np.linalg.norm(Uz - target, axis=1)  # distance L2 主干，高度势能
         # --- 势驱动 ---
         inner = np.einsum('ni,i->n', np.conj(dz), tz)  # Hermitian 内积 <dz | tz>
         E_potential = -np.real(inner)  # 朝目标移动，只在远区参与 energy 降低,线性泛函，类似 <dz, ∇V>
@@ -970,6 +983,7 @@ class SlowDynamics:
         # curvature = tangential / (radial + 1e-8)
 
         # E_geom = 0.5 * radial ** 2 +  (1.0 + curvature) * tangential
+        # 流体介质本身的阻力 + 涡旋效应 + 局部硬度带来的额外成本
         E_geom = radial + tangential + curvature * rot  # 局部度规修正，鼓励 radial 和 tangential，特别是在高曲率区域（纠结区）增加旋转奖励，促进探索
         # E_geom_norm = (
         #     radial / (norm_tz + 1e-8)
@@ -995,7 +1009,7 @@ class SlowDynamics:
         # + 0.05 * curvature * (rot + 0.5 * rot ** 2)
 
         # print(E_target, radial, tangential)
-        # 时间箭头 + 对称惩罚 time arrow vdot(dz, prev_dz)
+        # 时间箭头 + 对称惩罚 + 惯性阻尼 time arrow vdot(dz, prev_dz)
         E_traj = 0.0
         if prev_dz is not None:  # 鼓励同向，惩罚反向
             # 计算当前候选 move 与上一步 move 的“相似度”（越相似越惩罚）
@@ -1671,6 +1685,7 @@ class HybridAgent:
         self.z = env.model.project(state.vector)
         self.prev_dz = None
 
+        # 多场耦合系统
         z_hat = self.z / (np.linalg.norm(self.z) + 1e-8)  # 物理状态 z 的模长 = 物理信息（不能丢）,方向 = 认知信息（可以变）
         self.rho = np.outer(z_hat, z_hat.conj())  # 纯态密度矩阵,感知层,不参与真实演化（观测更新），马尔可夫式的当下存在，自在的存在
         if mutate_length > 0:  # 量子遗传（变异）
@@ -2007,7 +2022,7 @@ class HybridAgent:
         phase_scores = np.array([
             suitability + 1.0 / 3 * (1.0 - self.divergence_val + self.fidelity_val + self.purity_val),
             # exploit: 高信心 + 高规划可靠
-            (1.0 - suitability) + self.consistency_val * self.resource / np.sqrt(self.age + 1),
+            (1.0 - suitability) * self.consistency_val * self.resource / np.sqrt(self.age + 1),
             # revert:  低信心 + 规划失效,认知崩了才回退
             instability + self.divergence_val + 1.0 / 9 * self.plan_entropy_val,  # (1.0 - self.consistency_val)
             # explore: 高混乱 + 高曲率
@@ -2783,10 +2798,10 @@ class HybridSimulation:
             if t < 3:  # 初期强探索
                 T = 4.0 * base_temp
                 P = 1
-            elif t < model.Tf:
+            elif t < self.env.model.Tf:
                 T = 3.0 * base_temp
                 P = 2
-            elif t < 3 * model.Tf:
+            elif t < 3 * self.env.model.Tf:
                 P = 3
             else:  # 周期性温度波动
                 short_osc = 2.0 / 3. * np.sin(2 * np.pi * t / 32)

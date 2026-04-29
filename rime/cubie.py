@@ -2569,11 +2569,12 @@ class CubieBase(CubeBase):
         PHASE1_MOVES = CubieMove.phase1_moves()
 
         def dfs(coord, depth: int, last_move: tuple | None):
-            h = max(cls.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
-                    cls.UD_PRUNE[coord.ud_slice])  # admissible phase1_heuristic（reference）
-            if depth + h > depth_limit:
+            if depth > depth_limit:
                 return None
 
+            h = max(cls.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
+                    cls.UD_PRUNE[coord.ud_slice])  # admissible phase1_heuristic（reference）
+ 
             if coord.is_solved():  # EO=0, CO=0, UD-slice=solved, current_state.is_ud_slice_separated()
                 print('phase1_search', depth, h, coord.ud_slice)  # 69,current_state.ud_slice_coord()
                 return []  # 判断 phase1 solved
@@ -2602,13 +2603,13 @@ class CubieBase(CubeBase):
         PHASE2_MOVES = CubieMove.phase2_moves()
 
         def dfs(coord, depth: int, last_move: tuple | None) -> list[tuple] | None:
+            if depth > depth_limit:
+                return None
             h = max(
                 cls.CO_PRUNE[coord.corner_perm],
                 cls.EDGE_PRUNE[coord.edge_perm],
                 cls.SLICE_PRUNE[coord.ud_slice_perm]
             )
-            if depth + h > depth_limit:
-                return None
 
             if coord.is_solved():
                 print('phase2_search', depth, h, coord.ud_slice_perm)
@@ -2703,7 +2704,7 @@ class CubieBase(CubeBase):
 
     @classmethod
     def solve_phase1(cls, cubie: CubieState,
-                     start: int = 6, end: int = 12) -> tuple[list[tuple], CubieMove, CubieState]:
+                     start: int = 6, end: int = 13) -> tuple[list[tuple], CubieMove, CubieState]:
         path1 = None
         d = start  # 9
         while d < end:  # 9/13
@@ -2719,7 +2720,7 @@ class CubieBase(CubeBase):
 
     @classmethod
     def solve_phase2(cls, cubie: CubieState,
-                     start: int = 9, end: int = 19) -> tuple[list[tuple], CubieMove, CubieState]:
+                     start: int = 9, end: int = 20) -> tuple[list[tuple], CubieMove, CubieState]:
         path2 = None
         d = start
         while d < end:  # 12,20
@@ -2787,14 +2788,109 @@ class CubieBase(CubeBase):
     def solve_sticker(self, state: np.ndarray) -> list[tuple]:
         if not hasattr(self, 'CO_EO_PRUNE'):
             self.build_pruning_table()
-        # state = self.normalize_sticker(state)
-        cubie = self.to_cubie(state)
-        moves, mv = self.solve_kociemba(cubie)
-        act = [ActionToken.from_cubie_move(*t, n=self.n).key for t in moves]
+        if not hasattr(self, 'SYM_DATA'):
+            self.build_symmetry_data()
+
+        n = self.n
+        # 遍历 48 种对称，选 phase-1 剪枝距离最小的
+        best_sym, best_dist = 0, 999
+        for sym_id in range(48):
+            s_sym = CubeBase.apply_symmetry(state, sym_id)
+            s_fixed = self.SYM_DATA[sym_id]['color_perm'][s_sym]
+            c_sym = self.to_cubie(s_fixed)
+            coord = Phase1Coord.project(c_sym)
+            d = max(self.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
+                    self.UD_PRUNE[coord.ud_slice])
+            if d < best_dist:
+                best_dist, best_sym = d, sym_id
+
+        # 对最优对称状态求解
+        s_sym = CubeBase.apply_symmetry(state, best_sym)
+        s_fixed = self.SYM_DATA[best_sym]['color_perm'][s_sym]
+        c_aligned = self.to_cubie(s_fixed)
+        moves, mv = self.solve_kociemba(c_aligned)
+
+        # 用预计算的逆 move_map 将对称空间的解映射回原始空间
+        inv_map = self.SYM_DATA[best_sym]['inv_move_map']
+        moves_orig = [inv_map[t] for t in moves]
+
+        # correction: 解 inv_sym(solved) 的残余 → 同样用 inv_sym 的 inv_move_map 映射
+        correction = self._compute_correction(best_sym)
+        inv_sym = int(CubeBase.symmetry_inverse_id[best_sym])
+        corr_orig = [self.SYM_DATA[inv_sym]['inv_move_map'][t] for t in correction]
+
+        act = [ActionToken.from_cubie_move(*t, n=n).key for t in moves_orig + corr_orig]
         s0 = state.copy()
         self.act_moves(s0, act)
-        print(self.is_solved(s0), s0, '\n', self.to_cubie(s0), '\n', cubie)
+        print(f'sym={best_sym} inv={inv_sym} dist={best_dist} len={len(act)} '
+              f'solved={self.is_solved(s0)} corr={len(correction)}')
         return act
+
+
+    def build_symmetry_data(self):
+        """预计算每种对称的 color_perm 和 inv_move_map
+        color_perm[c] = σ(c): 将 apply_symmetry 后的贴纸颜色映射回标准中心
+        inv_move_map: 对称空间 move key → 原始空间 move key
+        """
+        solved = CubieState.solved()
+        prim = CubieMove.prim_moves  # {(axis, side, dir): CubieMove}
+
+        # 预计算 18 个原始 move 作用于 solved 的 cubie 状态
+        move_results = {k: m.act(solved) for k, m in prim.items()}
+
+        self.SYM_DATA = {}
+        for sym_id in range(48):
+            M = CubeBase.symmetry_matrices[sym_id]
+
+            # color_perm: σ(face_i) = face_j
+            color_perm = np.zeros(6, dtype=np.int8)
+            for old_fidx in range(6):
+                normal_old = CubeBase.face_normal[CubeBase.FACES[old_fidx]]
+                normal_new = M @ normal_old
+                for fidx, face in enumerate(CubeBase.FACES):
+                    if np.array_equal(normal_new, CubeBase.face_normal[face]):
+                        color_perm[old_fidx] = fidx
+                        break
+
+            # 对每个原始 move: 原始空间 → 对称空间 move
+            forward_map = {}
+            for key_orig in prim:
+                # 原始 move 作用于 solved → 贴纸 → 对称变换 → color_perm → cubie
+                c_orig = move_results[key_orig]
+                s_sticker = self.idx_to_state(c_orig.to_sticker())
+                s_sym = CubeBase.apply_symmetry(s_sticker, sym_id)
+                c_sym = self.to_cubie(color_perm[s_sym])
+                # 匹配: 哪个 prim move 产生同样的 cubie 状态？
+                for key_sym, c_target in move_results.items():
+                    if c_target == c_sym:
+                        forward_map[key_orig] = key_sym
+                        break
+
+            self.SYM_DATA[sym_id] = {
+                'color_perm': color_perm,
+                'inv_move_map': {v: k for k, v in forward_map.items()},
+                'correction': None,
+            }
+
+    def _compute_correction(self, sym_id: int) -> list:
+        """计算逆对称的修正序列: 解 σ⁻¹(solved) → solved"""
+        if self.SYM_DATA[sym_id]['correction'] is not None:
+            return self.SYM_DATA[sym_id]['correction']
+        inv_sym = int(CubeBase.symmetry_inverse_id[sym_id])
+        solved = self.solved.copy()
+        s_inv = CubeBase.apply_symmetry(solved, inv_sym)
+        s_fixed = self.SYM_DATA[inv_sym]['color_perm'][s_inv]
+        c_residual = self.to_cubie(s_fixed)
+        correction = []
+        if c_residual != CubieState.solved() and c_residual.is_solvable():
+            try:
+                correction, _ = CubieBase.solve_kociemba(
+                    c_residual, phase1_start=0, phase1_end=8,
+                    phase15_depth=-1, phase2_start=0, phase2_end=12)
+            except (AssertionError, ValueError):
+                pass
+        self.SYM_DATA[sym_id]['correction'] = correction
+        return correction
 
     @class_status('参考实现')
     def permutation_parity_ok(self, state):
@@ -3861,11 +3957,11 @@ class CubieBase(CubeBase):
         for move_key in [(0, -1, 1), (0, 1, 1), (2, -1, -1), (2, 1, -1)]:
             move = CubieMove.prim_moves[move_key]
             t = ActionToken.from_cubie_move(*move_key, n=3)
-            state = cube.rotate_state(cube.solved.copy(), *t.key)
-            corners = cube.get_corners(state)
+            state = self.rotate_state(self.solved.copy(), *t.key)
+            corners = self.get_corners(state)
             ori_sticker = np.empty(8, dtype=np.int8)
             # ... 计算 ori_sticker 的代码 ...
-            s11 = cube.to_cubie(state)
+            s11 = self.to_cubie(state)
             ori_sticker = s11.corners_ori
             s1 = move.act(s0)
             target_ori = s1.corners_ori

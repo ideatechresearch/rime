@@ -438,7 +438,7 @@ def draw_gram_matrix(G, title='Gram Matrix', xlabel='Mode index', ylabel='Mode i
                      cmap='hot', save_name=None):
     """Gram 矩阵热图"""
     plt.figure(figsize=(12, 12))
-    plt.imshow(np.real(G), cmap=cmap, interpolation='nearest')
+    plt.imshow(np.real(G), cmap=cmap, interpolation='nearest')#plt.imshow(np.abs(G))
     plt.colorbar(label='Real part')
     plt.title(title)
     plt.xlabel(xlabel)
@@ -492,7 +492,7 @@ def draw_coeo_distribution(prune: np.ndarray, title="CO-EO Prune Distance Distri
 
 
 def draw_coeo_slice_heatmaps(prune: np.ndarray, num_samples=6,
-                              title="Random CO Slices of EO Prune Table", save_name=None):
+                             title="Random CO Slices of EO Prune Table", save_name=None):
     """随机采样 corner_ori 行，展示 eo 距离热图"""
     import seaborn as sns
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -597,8 +597,8 @@ def draw_phase15_parity_delta_analysis(dist: np.ndarray, save_prefix=None):
             ax.loglog(unique_d[pos], data[pos], 'o-', label=label)
             slope, intercept, r_value, _, _ = linregress(log_d, log_data)
             ax.plot(unique_d[pos], 10 ** (intercept + slope * log_d), '--r',
-                    label=f"slope={slope:.2f}, R²={r_value**2:.2f}")
-            print(f"{label} log-log slope: {slope:.2f}, R²: {r_value**2:.2f}")
+                    label=f"slope={slope:.2f}, R²={r_value ** 2:.2f}")
+            print(f"{label} log-log slope: {slope:.2f}, R²: {r_value ** 2:.2f}")
         ax.set_xlabel("Distance (log scale)")
         ax.set_ylabel(f"{label} (log scale)")
         ax.grid(True, which="both", ls="--", alpha=0.5)
@@ -668,7 +668,7 @@ def draw_phase15_angular_svd(dist: np.ndarray, n_modes=5, save_prefix=None):
     n_show = min(n_modes, Vt.shape[0])
     plt.figure(figsize=(12, 7))
     for k in range(n_show):
-        plt.plot(range(n_valid), Vt[k, :], label=f"PC{k+1} (σ={S[k]:.3f})", linewidth=1.5)
+        plt.plot(range(n_valid), Vt[k, :], label=f"PC{k + 1} (σ={S[k]:.3f})", linewidth=1.5)
     plt.xlabel("Filtered Corner Index")
     plt.ylabel("Weight")
     plt.title("Angular Modes (clean SVD)")
@@ -689,7 +689,7 @@ def draw_phase15_angular_svd(dist: np.ndarray, n_modes=5, save_prefix=None):
     plt.ylabel("Radial layer index")
     plt.title("Layer Contribution to Angular Modes")
     plt.yticks(np.arange(len(D)))
-    plt.xticks(np.arange(n_rank), [f"rank {k+1}" for k in range(n_rank)])
+    plt.xticks(np.arange(n_rank), [f"rank {k + 1}" for k in range(n_rank)])
     plt.tight_layout()
     if save_prefix:
         plt.savefig(f"{save_prefix}_radial_heatmap.png", dpi=300, bbox_inches='tight')
@@ -840,7 +840,7 @@ if __name__ == "__main__":
         phase15_dist, save_prefix=os.path.join(DATA_DIR, "phase15_angular_svd"))
 
     # ── 5. CO-EO 剪枝表可视化 ──
-    coeo = CubieBase.cubie_distance()
+    coeo = CubieBase.CO_EO_PRUNE
     if coeo is not None and coeo.ndim == 2:
         draw_coeo_pixel_full(coeo)
         draw_coeo_prune(coeo)
@@ -867,14 +867,15 @@ if __name__ == "__main__":
 
     # 6d. 慢流形 3D 投影
     from rime.cubieworld import SlowDynamics
+
     model = SlowDynamics()
-    model.load()
-    z_solved = model.project(CubieState.solved().vec)
+    #model.load()
+    z_solved = model.project(CubieState.solved().vector)
     z_list, d_list = [], []
     for _ in range(5000):
         d = np.random.randint(0, 40)
         state = CubieBase.generate_cubie(length=d)
-        z_list.append(model.project(state.vec))
+        z_list.append(model.project(state.vector))
         d_list.append(d)
     Z = np.real(np.array(z_list) - z_solved)
     draw_slow_manifold_3d(Z, np.array(d_list),

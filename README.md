@@ -27,6 +27,7 @@ test/
 ├── test_cube.py          # 魔方贴纸级基础操作测试
 ├── test_cubie.py        # 魔方块级基础操作测试
 ├── test_cubieoperator.py # 群表示论实验（5个分组）
+├── test_cubieworld.py   # 慢动力学实验（13个分组）
 └── test_circular.py     # 环形数据结构实验（11个分组）
 ```
 
@@ -108,7 +109,6 @@ CubieState (角块+边块)
 **核心类：**
 - `CubieState`: 块级状态，包含 8 角块 + 12 边块的置换与朝向
 - `CubieMove`: 群元素，支持半直积作用、合成、逆元
-- `SlowDynamics`: Phase-1 子群慢动力学模型，谱分解与慢流形分析
 - `Phase1Coord`: Phase-1 坐标 (CO, EO, UD-slice)
 - `Phase2Coord`: Phase-2 坐标 (角块/边块排列)
 - `CubieBase`: 继承自 `CubeBase`，提供两阶段搜索接口
@@ -117,7 +117,7 @@ CubieState (角块+边块)
 
 
 ```python
-from rime.cubie import CubieState, CubieMove, CubieBase, SlowDynamics
+from rime.cubie import CubieState, CubieMove, CubieBase
 
 # 创建已解状态
 state = CubieState.solved()
@@ -131,12 +131,13 @@ CubieBase.build_pruning_table()  # 构建剪枝表（首次运行）
 moves, cubie_move, final_state = CubieBase.solve_kociemba(state)
 print(f"Solution: {moves}")
 
-# 慢动力学分析
-model = SlowDynamics.from_phase1_generators(n_generators=18)
-vec = state.to_rho()  # 转换为 228 维表示
+# 慢动力学分析（见 cubieworld.py 模块）
+from rime.cubieworld import SlowDynamics
+model = SlowDynamics(n=18)
+vec = state.vector  # 228 维表示
 z = model.project(vec)  # 投影到 100 维慢子空间
 z_t = model.evolve(z, T=10)  # 慢子空间演化
-x_t = model.reconstruct(z_t)  # 重构回原空间
+x_t = model.lift(z_t)  # 重构回原空间
 distance = model.heuristic(vec, x_t)  # 计算慢子空间距离
 ```
 
@@ -240,7 +241,7 @@ app.run()
 - 谱分层: λ ∈ {1, 7/9, 2/3, 5/9, 1/3}，对应维度 {24, 44, 32, 96, 32}
 - 慢谱嵌入对 10 步以内状态距离相关性显著 (r ≈ 0.5)
 - 快层谱半径 ≈ 5/9，20–23 步内充分衰减
-- 准等距距离: d(x,y) = ||V_slowᵀ(x-y)||，误差 1.0059 ± 0.0871
+- 准等距距离: d(x,y) = ||V_slowᵀ(x-y)||，实验验证 1.0059±0.0871 / 1.0003±0.0144
 
 ### 5. 慢动力学模型 ([cubieworld.py](rime/cubieworld.py))
 
@@ -252,33 +253,46 @@ Phase-1 转移算符谱分析与慢流形建模。
 - 快子空间（λ < 2/3）：128 维，谱半径 ≈ 5/9
 - 双时间尺度系统：边块混合 ≈ 5 步，角块混合 ≈ 20 步
 - 群谐函数：前 8 个模式精确谐（误差=0）
+- 普适谱定律：λ = 1 - k/m（m = |S|/2），对 2–18 个生成元均成立
+- 几何能量函数：E = norm(E_base) + 0.3·norm(E_geom)，三区动力学
 
 **核心类：**
-- `SlowDynamics`: 慢动力学模型，支持投影、演化、重构、启发式距离
-- 谱分解：`A = (1/|S|)∑ρ(s)` → Σ λ_i E_i
-- 维度分布：守恒 24，慢模 44，次慢 32，中速 96，快速 32
+- `SlowDynamics(n=N_GENERATORS)`: 慢动力学模型，支持投影、演化、重构、启发式距离
+  - `project(vec)` / `lift(z)`: 228→100 维投影 / 100→228 维还原
+  - `evolve(z, T)`: 慢子空间谱演化
+  - `heuristic(x, y)`: 准等距慢距离
+  - `move_energy(z, z_goal)`: 几何能量函数
+  - `move_scores(z, z0, preference)`: 五分量 move 打分
+  - `behavior_distance(x, y)`: 行为距离
+  - `lie_curvature(z)`: 局部李曲率
+  - `greedy_search_slow` / `guided_search_slow` / `bfs_slow`: 慢空间搜索算法
+- `Environment`: 慢流形上的目标状态环境
+- `HybridAgent`: 混合智能体（慢空间探索 + 群作用搜索）
+- `HybridSimulation`: 完整模拟系统
+- `N_GENERATORS`: 默认生成元数常量（18）
 
 ```python
-from rime.cubieworld import SlowDynamics, CubieMove, CubieState
+from rime.cubieworld import SlowDynamics, Environment, N_GENERATORS
+from rime.cubie import CubieState, CubieMove
 
 # 构建慢动力学模型
-model = SlowDynamics.from_phase1_generators(n_generators=18)
+model = SlowDynamics(n=N_GENERATORS)
 
 # 状态投影到慢子空间
 state = CubieState.solved()
-vec = state.to_rho()  # 228 维表示
+vec = state.vector  # 228 维表示
 z = model.project(vec)  # (100,) 慢子空间
 
 # 慢子空间演化
 z_t = model.evolve(z, T=10)
-x_t = model.reconstruct(z_t)
+x_t = model.lift(z_t)
 
 # 计算慢子空间距离（启发式）
 distance = model.heuristic(vec_a, vec_b)
 ```
 
 **算法意义：**
-- 准等距距离启发式：d(x,y) = ||V_slowᵀ(x-y)||，误差 1.0059 ± 0.0871
+- 准等距距离启发式：d(x,y) = ||V_slowᵀ(x-y)||，实验验证 1.0059±0.0871 / 1.0003±0.0144
 - 可用于 A*/IDA* 搜索、生成慢距离 scramble、低秩模拟
 - 有效动力学维度 ≈ 5–6，由 rank-6 attention operator 控制
 
@@ -504,6 +518,7 @@ pip install -e .
 python test/test_cube.py
 python test/test_cubie.py
 python test/test_cubieoperator.py
+python test/test_cubieworld.py
 python test/test_circular.py
 ```
 
@@ -517,18 +532,19 @@ python -m rime.cubedraw
 ### 慢动力学分析
 
 ```python
-from rime.cubieworld import SlowDynamics, CubieMove, CubieState
+from rime.cubieworld import SlowDynamics, N_GENERATORS
+from rime.cubie import CubieState, CubieMove
 
 # 构建慢动力学模型
-model = SlowDynamics.from_phase1_generators(n_generators=18)
+model = SlowDynamics(n=N_GENERATORS)
 
 # 分析两个状态的距离
 state_a = CubieState.solved()
 state_b = CubieMove.from_rotation(0, 1, 1).act(state_a)
 
 # 投影到慢子空间
-vec_a = state_a.to_rho()
-vec_b = state_b.to_rho()
+vec_a = state_a.vector
+vec_b = state_b.vector
 z_a = model.project(vec_a)  # (100,) 慢子空间
 z_b = model.project(vec_b)
 
@@ -588,28 +604,30 @@ matrix = pyramid.to_matrix(fill_center_with=('O', 'O'))
 ### 群表示分析
 
 ```python
-from rime.cubieoperator import detect_blocks, verify_association_scheme
-from rime.cubieworld import SlowDynamics
+from rime.cubieoperator import detect_blocks, verify_bose_mesner
+from rime.cubieworld import SlowDynamics, N_GENERATORS
 from rime.cubie import CubieMove, CubieState
 import numpy as np
 
 # 获取 Phase-1 生成元
-generators = list(CubieMove.phase1_moves().values())
+generators = list(CubieMove.prim_moves.values())
+rho_moves = [m.rho() for m in generators]
+A_micro = sum(rho_moves) / len(rho_moves)
 
-# 构建 228 维表示
-# U, w = build_group_representation(generators)  # 假设有此函数
-# blocks = detect_blocks(generators, U)
+# 特征分解
+w, V = np.linalg.eigh(A_micro)
+blocks = detect_blocks(generators, V)
 
 # 验证 Bose-Mesner 代数
-# success, message, details = verify_association_scheme(A_micro, generators)
+# verify_bose_mesner(A_micro, rho_moves)
 
 # 慢动力学模型
-model = SlowDynamics.from_phase1_generators(n_generators=18)
+model = SlowDynamics(n=N_GENERATORS)
 state_a = CubieState.solved()
 state_b = CubieMove.from_rotation(0, 1, 1).act(state_a)
 
-vec_a = state_a.to_rho()
-vec_b = state_b.to_rho()
+vec_a = state_a.vector
+vec_b = state_b.vector
 z_a = model.project(vec_a)  # (100,) 慢子空间
 z_b = model.project(vec_b)
 
@@ -618,7 +636,7 @@ slow_distance = model.heuristic(vec_a, vec_b)
 
 # 慢子空间演化
 z_t = model.evolve(z_a, T=10)
-x_t = model.reconstruct(z_t)
+x_t = model.lift(z_t)
 ```
 
 ### 魔方世界模型
@@ -660,13 +678,14 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 - **Kociemba 算法**: 分两阶段降维求解
   - Phase-1: 恢复方向 + 边块分层（搜索空间 ~10¹⁰）
   - Phase-2: 排列还原（搜索空间 ~10⁸）
-- **慢动力学谱分解**: Phase-1 转移算符 A = (1/|S|)∑ρ(s) 的谱结构
-  - 5 个有理特征值层: λ ∈ {1, 7/9, 2/3, 5/9, 1/3}
-  - 对应维度: {24, 44, 32, 96, 32}，总计 228 维
+- **慢动力学谱分解** (cubieworld.py): Phase-1 转移算符 A = (1/|S|)∑ρ(s) 的谱结构
+  - 5 个有理特征值层: λ ∈ {1, 7/9, 2/3, 5/9, 1/3}，对应维度 {24, 44, 32, 96, 32}
+  - λ=7/9 块精细分解: $E_{7/9} = V_{32} \oplus V_{12}$，Gram 矩阵严格正交
   - 慢子空间 (λ ≥ 2/3): 100 维，准不变子空间
   - 快子空间 (λ < 2/3): 128 维，谱半径 ≈ 5/9，20–23 步内衰减
   - 转移算符: A = Σ λ_i E_i，E_i 为特征投影子
   - 慢演化: z_t = λ^t z₀，T=100 相对误差 < 6×10⁻⁷
+  - 准等距性: 实验验证 1.0059±0.0871 (实验1), 1.0003±0.0144 (实验2)
 
 ### ABO 血型遗传
 
@@ -685,11 +704,12 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 ### 魔方群表示论
 
 - **表示空间**: Phase-1 生成元在 228 维复空间上的表示
-- **谱分解**: 5 个不变子空间，对应 5 个不可约表示
-  - 快速模态 (λ < 1/3): 32 维
-  - 中速模态 (1/3 ≤ λ < 2/3): 96 维
-  - 慢速模态 (λ ≥ 2/3): 100 维
-  - 守恒模态 (λ = 1): 24 维（群谐函数）
+- **谱分解**: 5 个不变子空间，对应 5 个特征值层
+  - 守恒模态 (λ = 1): 24 维（群谐函数，精确不变）
+  - 慢速模态 (λ = 7/9): 44 维（准谐函数，V₃₂ ⊕ V₁₂）
+  - 次慢模态 (λ = 2/3): 32 维（共同不变子空间）
+  - 中速模态 (λ = 5/9): 96 维（混沌混合）
+  - 快速模态 (λ = 1/3): 32 维（快速衰减）
 - **慢流形**: 捕捉局部搜索结构，对 10 步内状态距离相关性 r ≈ 0.5
 - **角向低秩**: Phase-1.5 状态空间的角向变化 rank=5 可精确拟合
 - **转移算符**: A = (1/|S|)∑ρ(s)，谱分解 A = Σ λ_i E_i

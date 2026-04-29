@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pygame
 from OpenGL.GL import *
@@ -7,8 +8,8 @@ import tkinter as tk
 from tkinter import scrolledtext
 
 from rime.cube import StickerCube, CubeBase
-from rime.cubedraw import BaseCubeRenderer, RotationAnimation
 from rime.cubie import CubieBase
+from rime.cubedraw import BaseCubeRenderer, RotationAnimation
 
 
 class OpenGLCubeRenderer(BaseCubeRenderer):
@@ -32,7 +33,7 @@ class OpenGLCubeRenderer(BaseCubeRenderer):
         super().__init__(cube, scale=(2.8 / cube.n))
         self.width = w
         self.height = h
-        self.init_gl()
+        self._gl_ready = False
 
     def init_gl(self):
         glViewport(0, 0, self.width, self.height)
@@ -51,13 +52,14 @@ class OpenGLCubeRenderer(BaseCubeRenderer):
     def resize(self, width, height):
         self.width = width
         self.height = height
-        glViewport(0, 0, width, height)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(45, width / height if height else 1.0, 0.1, 100.0)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        glTranslatef(0.0, 0.0, -6.0)
+        if self._gl_ready:
+            glViewport(0, 0, width, height)
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            gluPerspective(45, width / height if height else 1.0, 0.1, 100.0)
+            glMatrixMode(GL_MODELVIEW)
+            glLoadIdentity()
+            glTranslatef(0.0, 0.0, -6.0)
 
     def zoom(self, delta):
         factor = 1.1 if delta > 0 else 0.9
@@ -66,6 +68,9 @@ class OpenGLCubeRenderer(BaseCubeRenderer):
         self.scale = min(self.scale, 5.0)
 
     def draw(self):
+        if not self._gl_ready:
+            self.init_gl()
+            self._gl_ready = True
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glPushMatrix()
         glScalef(self.scale, self.scale, self.scale)
@@ -804,6 +809,17 @@ def run_with_tkinter(cube=None, n=3, port=9999):
 
 if __name__ == "__main__":
     import sys
+
+    # venv 下 Tcl/Tk 路径修复：venv 无法自动找到系统 Tcl 库
+    if sys.platform == 'win32' and not os.environ.get('TCL_LIBRARY'):
+        base = os.path.dirname(sys.executable)
+        for candidate in [base, os.path.dirname(base)]:
+            tcl_dir = os.path.join(candidate, 'tcl', 'tcl8.6')
+            tk_dir = os.path.join(candidate, 'tcl', 'tk8.6')
+            if os.path.isfile(os.path.join(tcl_dir, 'init.tcl')):
+                os.environ['TCL_LIBRARY'] = tcl_dir
+                os.environ['TK_LIBRARY'] = tk_dir
+                break
 
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 

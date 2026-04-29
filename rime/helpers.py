@@ -151,6 +151,42 @@ def von_neumann_entropy(rho):
     w = w[w > 1e-12]
     return -np.sum(w * np.log(w)) if len(w) > 0 else 0.0
 
+def kl_divergence(p, q, eps=1e-10):
+    """单个 KL(p || q)，带数值稳定"""
+    p = np.asarray(p) + eps
+    q = np.asarray(q) + eps
+    p = p / p.sum()
+    q = q / q.sum()
+    return np.sum(p * np.log(p / q))
+
+
+def compute_total_jeffreys(distributions, eps=1e-10):
+    """对称 KL 散度： KL(p||q) + KL(q||p) """
+    k = len(distributions)
+    total = 0.0
+    for i in range(k):
+        for j in range(i+1, k):  # 只计算上三角，避免重复
+            kl_ij = kl_divergence(distributions[i], distributions[j], eps)
+            kl_ji = kl_divergence(distributions[j], distributions[i], eps)
+            jd = kl_ij + kl_ji
+            total += jd
+    return total
+
+def pairwise_kl_matrix(distributions, eps=1e-10):
+    """返回 (k, k) 的 KL 距离矩阵"""
+    k = len(distributions)
+    dists = np.array(distributions) + eps
+    dists = dists / dists.sum(axis=1, keepdims=True)
+    
+    # log(p/q) = log p - log q
+    log_dists = np.log(dists)
+    kl_matrix = np.zeros((k, k))
+    
+    for i in range(k):
+        kl_matrix[i] = np.sum(dists[i][:, None] * (log_dists[i][:, None] - log_dists), axis=0)
+    
+    return kl_matrix
+
 
 def fidelity(rho, sigma, eps=1e-8):
     """

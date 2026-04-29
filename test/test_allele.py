@@ -189,7 +189,7 @@ def test_probability_mappings():
 
 def test_compatibility_mappings():
     """输血兼容性相关映射"""
-    print('union', Allele.union_antigens(Allele.allele('A'), Allele.allele('O')))
+    print('union', Allele.union_antigens(Allele('A'), Allele('O')))
     print('compatible O->A', Allele.is_compatible_phenotype('O', 'A'))
     print('genotype_transfusion', Allele.genotype_transfusion_mapping())
     print('allele_state', Allele.allele_state_mapping())
@@ -233,7 +233,7 @@ def test_cache_operations():
 
 def test_rebuild_constants():
     """重建常量和不同轴系统"""
-    print(dir(Allele.allele('B')), '\n', Allele.allele('O').__dict__)
+    print(dir(Allele('B')), '\n', Allele('O').__dict__)
     Allele.rebuild_constants()
     print(Allele.get_vars())
     print('repr', Allele.__repr__)
