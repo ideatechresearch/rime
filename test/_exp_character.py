@@ -13,56 +13,10 @@ sys.path.insert(0, '.')
 import numpy as np
 from rime.cubieoperator import *
 from rime.cubieworld import SlowDynamics
-from rime.cube import ActionToken
 from itertools import combinations
 
 prim = CubieMove.prim_moves()
-sd = SlowDynamics.__new__(SlowDynamics)
-
-
-def build_h_operators(gens_dict):
-    h_ops, h_labels = [], []
-    for axis in range(3):
-        for side in [-1, 1]:
-            cw_key = (axis, side, -1)
-            ccw_key = (axis, side, 1)
-            if cw_key in gens_dict and ccw_key in gens_dict:
-                h_ops.append((gens_dict[cw_key].rho() + gens_dict[ccw_key].rho()) / 2)
-                at_cw = str(ActionToken.from_cubie_move(*cw_key, n=3))
-                at_ccw = str(ActionToken.from_cubie_move(*ccw_key, n=3))
-                h_labels.append(f"({at_cw}+{at_ccw})/2")
-    for axis in range(3):
-        keys_180 = [(axis, side, 2) for side in [-1, 1] if (axis, side, 2) in gens_dict]
-        if len(keys_180) == 2:
-            h_ops.append((gens_dict[keys_180[0]].rho() + gens_dict[keys_180[1]].rho()) / 2)
-            at_a = str(ActionToken.from_cubie_move(*keys_180[0], n=3))
-            at_b = str(ActionToken.from_cubie_move(*keys_180[1], n=3))
-            h_labels.append(f"({at_a}+{at_b})/2")
-    return h_ops, h_labels
-
-
-def eig_decomp(A):
-    """Return (eigenvalues, eigenvectors) handling both Hermitian and non-Hermitian."""
-    if np.allclose(A, A.T.conj(), atol=1e-10):
-        return np.linalg.eigh(A)
-    w_raw, V_raw = np.linalg.eig(A)
-    mask = np.abs(np.imag(w_raw)) < 1e-8
-    return np.real(w_raw[mask]), V_raw[:, mask]
-
-
-def eigenspaces(A):
-    """Return dict: eigenvalue -> (dim, projector) using clustering at 1e-6 tolerance."""
-    w, V = eig_decomp(A)
-    # Cluster eigenvalues at higher precision
-    w_rounded = np.round(w, 6)
-    unique_w = np.unique(w_rounded)
-    result = {}
-    for lam in unique_w:
-        idx = np.where(w_rounded == lam)[0]
-        V_lam = V[:, idx]
-        P_lam = V_lam @ V_lam.T.conj()
-        result[lam] = {'dim': len(idx), 'projector': P_lam}
-    return result, w, V
+sd = SlowDynamics.lite()
 
 
 # ---- Generator sets ----
@@ -113,7 +67,7 @@ for name, gens_dict in gens_sets.items():
     rhos = [m.rho() for m in gens_dict.values()]
     n_gen = len(rhos)
     A_S = sum(rhos) / n_gen
-    spaces, w, V = eigenspaces(A_S)
+    spaces = eigenspaces(A_S)
 
     max_dev = 0.0
     for lam, info in spaces.items():
@@ -361,7 +315,7 @@ print(f"  (For comparison: commuting h_i → error ~ 2e-8)")
 print()
 
 # Show the true eigenvalues and their character averages
-spaces, w, V = eigenspaces(A_S)
+spaces = eigenspaces(A_S)
 print(f"  {'λ_true':>10s} {'dim':>5s} {'λ_char':>12s} {'|dev|':>12s} {'rational?':>10s}")
 print(f"  {'-'*50}")
 for lam, info in sorted(spaces.items()):

@@ -26,8 +26,10 @@ import numpy as np
 import os
 
 sys.path.insert(0, '.')
-from rime.cubieoperator import CubieMove
+from rime.cubieoperator import (CubieMove, eigenspaces, build_A,
+                                 classify_spectral_field, spectral_field_label)
 from rime.cubieworld import SlowDynamics
+from rime.helpers import is_in_qsqrt5, is_rational_form
 from rime.base import DATA_DIR
 
 plt.rcParams.update({
@@ -41,34 +43,8 @@ plt.rcParams.update({
 SAVE_DIR = os.path.join(DATA_DIR, 'paper_figures')
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-sd = SlowDynamics.__new__(SlowDynamics)
+sd = SlowDynamics.lite()
 prim = CubieMove.prim_moves()
-
-
-# ============================================================
-# Utility: eigenspace decomposition
-# ============================================================
-def eigenspaces(A, tol=1e-6):
-    if np.allclose(A, A.T.conj(), atol=1e-10):
-        w, V = np.linalg.eigh(A)
-    else:
-        w_raw, V_raw = np.linalg.eig(A)
-        mask = np.abs(np.imag(w_raw)) < 1e-8
-        w, V = np.real(w_raw[mask]), V_raw[:, mask]
-    w_rounded = np.round(w, 6)
-    unique_w = np.unique(w_rounded)
-    result = {}
-    for lam in unique_w:
-        idx = np.where(w_rounded == lam)[0]
-        V_lam = V[:, idx]
-        P_lam = V_lam @ V_lam.T.conj()
-        result[lam] = {'dim': len(idx), 'projector': P_lam}
-    return result
-
-
-def build_A(gens_dict):
-    rhos = [m.rho() for m in gens_dict.values()]
-    return sum(rhos) / len(rhos)
 
 
 def face_label(key):
@@ -119,30 +95,7 @@ for name, gens in gen_configs:
     }
 
 
-def classify_set(name, data):
-    """Classify generator set type for field assignment.
-
-    Returns one of: 'rational', 'sqrt5', 'higher'
-    Uses theoretical classification, not numerical heuristics.
-    """
-    if data['is_rational']:
-        return 'rational'
-    # n=8 and n=16 are the symmetry-broken cases proven to yield ℚ(√5)
-    if name in ('n=8', 'n=16'):
-        return 'sqrt5'
-    return 'higher'
-
-
-def field_label(set_class):
-    """Return mathematical field notation for a set class."""
-    return {
-        'rational': r'$\mathbb{Q}$',
-        'sqrt5': r'$\mathbb{Q}(\sqrt{5})$',
-        'higher': r'$\mathbb{Q}(\zeta_n)^+$',
-    }[set_class]
-
-
-def spectrum_description(name, data, set_class):
+def _spec_description(name, data, set_class):
     """Return structure-oriented description of the spectrum."""
     if set_class == 'rational':
         return f"Rational\nλ = 1−k/{data['m_eff']}"
@@ -153,9 +106,9 @@ def spectrum_description(name, data, set_class):
 
 
 for name, data in spectral_data.items():
-    data['set_class'] = classify_set(name, data)
-    data['field'] = field_label(data['set_class'])
-    data['spec_desc'] = spectrum_description(name, data, data['set_class'])
+    data['set_class'] = classify_spectral_field(data['eigs'], data['m_eff'], name)
+    data['field'] = spectral_field_label(data['set_class'])
+    data['spec_desc'] = _spec_description(name, data, data['set_class'])
 
 
 # ============================================================

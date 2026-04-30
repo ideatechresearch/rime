@@ -9,10 +9,96 @@ if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8
 
 from rime.cubie import CubieState, CubieMove, CubieBase
 from rime.base import DATA_DIR
+from rime.helpers import is_in_qsqrt5, is_rational_form
 import numpy as np
 import random, math
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+
+
+# ============================================================
+# Shared spectral utilities (used by _exp_*.py test files)
+# ============================================================
+
+def eigenspaces(A, tol=1e-6):
+    """Eigenspace decomposition: {eigenvalue: {'dim': int, 'projector': ndarray}}.
+
+    Handles both Hermitian (eigh) and non-Hermitian (eig) matrices.
+    Returns only real eigenvalues.
+    """
+    if np.allclose(A, A.T.conj(), atol=1e-10):
+        w, V = np.linalg.eigh(A)
+    else:
+        w_raw, V_raw = np.linalg.eig(A)
+        mask = np.abs(np.imag(w_raw)) < 1e-8
+        w, V = np.real(w_raw[mask]), V_raw[:, mask]
+    w_rounded = np.round(w, 6)
+    unique_w = np.unique(w_rounded)
+    result = {}
+    for lam in unique_w:
+        idx = np.where(w_rounded == lam)[0]
+        V_lam = V[:, idx]
+        P_lam = V_lam @ V_lam.T.conj()
+        result[lam] = {'dim': len(idx), 'projector': P_lam}
+    return result
+
+
+def build_A(gens_dict):
+    """Build averaging operator A = (1/|S|) Σ_{s∈S} ρ(s)."""
+    rhos = [m.rho() for m in gens_dict.values()]
+    return sum(rhos) / len(rhos)
+
+
+def build_h_operators(gens_dict):
+    """Build symmetric h_i = (ρ(g) + ρ(g⁻¹))/2 operators from generator dict.
+
+    Returns (h_ops, h_labels) where h_ops are (228,228) arrays.
+    """
+    from rime.cube import ActionToken
+    h_ops, h_labels = [], []
+    for axis in range(3):
+        for side in [-1, 1]:
+            cw_key = (axis, side, -1)
+            ccw_key = (axis, side, 1)
+            if cw_key in gens_dict and ccw_key in gens_dict:
+                h_ops.append((gens_dict[cw_key].rho() + gens_dict[ccw_key].rho()) / 2)
+                at_cw = str(ActionToken.from_cubie_move(*cw_key, n=3))
+                at_ccw = str(ActionToken.from_cubie_move(*ccw_key, n=3))
+                h_labels.append(f"({at_cw}+{at_ccw})/2")
+    for axis in range(3):
+        keys_180 = [(axis, side, 2) for side in [-1, 1] if (axis, side, 2) in gens_dict]
+        if len(keys_180) == 2:
+            h_ops.append((gens_dict[keys_180[0]].rho() + gens_dict[keys_180[1]].rho()) / 2)
+            at_a = str(ActionToken.from_cubie_move(*keys_180[0], n=3))
+            at_b = str(ActionToken.from_cubie_move(*keys_180[1], n=3))
+            h_labels.append(f"({at_a}+{at_b})/2")
+    return h_ops, h_labels
+
+
+def classify_spectral_field(eigs, m_eff, name=None):
+    """Classify spectral field as 'rational', 'sqrt5', or 'higher'.
+
+    Uses theoretical classification: n=8/n=16 → sqrt5, otherwise based on m_eff check.
+    """
+    all_rational = all(is_rational_form(lam, m_eff) for lam in eigs)
+    if all_rational:
+        return 'rational'
+    if name in ('n=8', 'n=16'):
+        return 'sqrt5'
+    # Check if all non-rational eigenvalues are in ℚ(√5)
+    non_rat = [lam for lam in eigs if not is_rational_form(lam, m_eff)]
+    if non_rat and all(is_in_qsqrt5(lam)[0] for lam in non_rat):
+        return 'sqrt5'
+    return 'higher'
+
+
+def spectral_field_label(set_class):
+    """Return LaTeX field notation for a set class."""
+    return {
+        'rational': r'$\mathbb{Q}$',
+        'sqrt5': r'$\mathbb{Q}(\sqrt{5})$',
+        'higher': r'$\mathbb{Q}(\zeta_n)^+$',
+    }[set_class]
 
 
 def detect_blocks(moves, U, tol=1e-8):

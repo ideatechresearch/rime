@@ -479,6 +479,7 @@ class SlowDynamics:
         - 16: 排除某些特定组合
         - 12: 标准 face-turn（k[2] != 2）
         - 10: 部分破缺对称性
+        - 21：6个特征值，满足 λ = 1 - k/21，9个 h_i，但只有 12/36 对交换
         - ... (其他 n 如 9,8,6,4,3,2)
 
         返回：{move_key: rho_matrix} 字典
@@ -509,6 +510,16 @@ class SlowDynamics:
              }
         match = f.get(n, lambda k: False)
         return {k: (mv, mv.rho(), mv.matrix) for k, mv in CubieMove.prim_moves.items() if match(k)}
+
+    @classmethod
+    def lite(cls):
+        """Return lightweight instance without running full eigenspace decomposition.
+
+        Use this when you only need rho_moves() or other classmethods,
+        avoiding the expensive __init__ that computes A_micro, eigh, etc.
+        Equivalent to the old pattern: SlowDynamics.__new__(SlowDynamics).
+        """
+        return cls.__new__(cls)
 
     def random_walk(self, length: int = 10, p=None) -> CubieMove:
         gen = [m for m, *_ in self.rho_moves.values()]

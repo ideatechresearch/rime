@@ -151,6 +151,7 @@ def von_neumann_entropy(rho):
     w = w[w > 1e-12]
     return -np.sum(w * np.log(w)) if len(w) > 0 else 0.0
 
+
 def kl_divergence(p, q, eps=1e-10):
     """单个 KL(p || q)，带数值稳定"""
     p = np.asarray(p) + eps
@@ -165,26 +166,27 @@ def compute_total_jeffreys(distributions, eps=1e-10):
     k = len(distributions)
     total = 0.0
     for i in range(k):
-        for j in range(i+1, k):  # 只计算上三角，避免重复
+        for j in range(i + 1, k):  # 只计算上三角，避免重复
             kl_ij = kl_divergence(distributions[i], distributions[j], eps)
             kl_ji = kl_divergence(distributions[j], distributions[i], eps)
             jd = kl_ij + kl_ji
             total += jd
     return total
 
+
 def pairwise_kl_matrix(distributions, eps=1e-10):
     """返回 (k, k) 的 KL 距离矩阵"""
     k = len(distributions)
     dists = np.array(distributions) + eps
     dists = dists / dists.sum(axis=1, keepdims=True)
-    
+
     # log(p/q) = log p - log q
     log_dists = np.log(dists)
     kl_matrix = np.zeros((k, k))
-    
+
     for i in range(k):
         kl_matrix[i] = np.sum(dists[i][:, None] * (log_dists[i][:, None] - log_dists), axis=0)
-    
+
     return kl_matrix
 
 
@@ -388,6 +390,38 @@ def weierstrass(x, a=0.5, b=21, n_terms=100):
         result += a ** n * np.cos(b ** n * np.pi * x)
 
     return result
+
+
+def is_rational_form(lam, denom, tol=1e-5):
+    """Check if λ ≈ k/denom for some integer k (0 ≤ k ≤ denom).
+
+    Used to detect eigenvalues of the form λ = 1 − k/m
+    in face-symmetric generator sets.
+    """
+    return abs(lam - round(lam * denom) / denom) < tol
+
+
+# ============================================================
+# Spectral field detection utilities
+# ============================================================
+
+def is_in_qsqrt5(lam, tol=1e-5):
+    """Check if λ ∈ ℚ(√5): λ = (p + q√5)/r for small integers p,q,r with q≠0.
+
+    Returns (True, (p, q, r)) if found, else (False, None).
+    Used by the spectral rationality paper to detect ℚ(√5) eigenvalues
+    in symmetry-broken generator sets (n=8, n=16).
+    """
+    sqrt5 = np.sqrt(5)
+    for p in range(-20, 21):
+        for q in range(-20, 21):
+            if q == 0:
+                continue
+            for r in range(1, 21):
+                val = (p + q * sqrt5) / r
+                if abs(lam - val) < tol:
+                    return True, (p, q, r)
+    return False, None
 
 
 def geometric_brownian_motion(S0=100, mu=0.05, sigma=0.2, T=1.0, N=1000, seed=None):

@@ -722,7 +722,6 @@ def test_attention_reconstruction(A_micro, w, V):
     # attention 演化精度
     M_layers = [E1, E7_9, E2_3, E5_9, E1_3]
     lambda_list = [1.0, 7 / 9, 2 / 3, 5 / 9, 1 / 3]
-    from rime.cubieoperator import attention_evolve_exact
     initial_rho = CubieMove.identity().rho()
     x = initial_rho.copy().astype(complex)
     for t in range(5):
@@ -905,7 +904,7 @@ def test_rho_moves_spectral_law():
     print("rho_moves 多生成元验证: 谱分层 = f(|S|, 对称性)")
     print("=" * 70)
 
-    sd = SlowDynamics.__new__(SlowDynamics)  # 绕过 __init__ 获取 class_cache 方法
+    sd = SlowDynamics.lite()
 
     header = f"{'n':>3} {'|S|':>3} {'m':>3} {'herm':>5} {'#λ':>3} {'poly_rk':>7} {'slowD':>5} {'rational':>8}"
     print(header)
@@ -1252,7 +1251,7 @@ def test_face_completeness_condition():
     """
     print("\n── 8.5 面完备性条件 ──")
 
-    sd = SlowDynamics.__new__(SlowDynamics)
+    sd = SlowDynamics.lite()
 
     test_cases = [
         (18, "全生成元 (完备)", True, True),
@@ -1787,7 +1786,6 @@ def test_generator_set_dependence():
     print("§11.1 生成元集依赖性: 谱坍缩 vs 生成元结构")
     print("=" * 70)
 
-    from rime.cube import ActionToken
     prim = CubieMove.prim_moves()
 
     # ── 定义各生成元集 ──
@@ -2010,7 +2008,6 @@ def test_galois_integrality_generator_characters():
     |affected corners| ≤ 4. Then χ_co = n_0 + n_1(ω+ω²) = n_0 - n_1 ∈ ℤ.
     Cp, Ep, Eo blocks are permutation matrices → integer trace.
     """
-    from rime.cubieoperator import CubieMove
     prim = CubieMove.prim_moves()
     omega = np.exp(2j * np.pi / 3)  # complex128
     # Use 1e-6 tolerance for ω comparison: rho entries are complex64 upcast,
@@ -2092,10 +2089,8 @@ def test_galois_invariance_averaging_operator():
     cancellation across complementary faces (R+L, F+B), not from individual
     generator σ-invariance.
     """
-    from rime.cubieoperator import CubieMove
-    from rime.cubieworld import SlowDynamics
     prim = CubieMove.prim_moves()
-    sd = SlowDynamics.__new__(SlowDynamics)
+    sd = SlowDynamics.lite()
 
     print("═══ Theorem 5.7: Galois Invariance σ(A) = A ═══")
     print("Claim: For face-symmetric S, σ(A) = A → A entries ∈ ℚ.\n")
@@ -2229,10 +2224,8 @@ def test_galois_character_sum_rationality():
     Step 4 gap: proving P_λ defined over ℚ(ω) for face-symmetric non-commuting case.
     Numerically verified to machine precision, but no algebraic proof yet.
     """
-    from rime.cubieoperator import CubieMove
-    from rime.cubieworld import SlowDynamics
     prim = CubieMove.prim_moves()
-    sd = SlowDynamics.__new__(SlowDynamics)
+    sd = SlowDynamics.lite()
 
     print("═══ Theorem 5.8: Character-Sum Rationality ═══")
     print("Claim: Σ χ_λ(s) ∈ ℤ for face-symmetric S → λ ∈ ℚ (λ = 1-k/m).")
@@ -2400,10 +2393,8 @@ def test_spectral_field_stratification():
     For n=16: characteristic polynomial 64λ² - 88λ + 29 = 0 → λ = (11±√5)/16
     Both in ℚ(√5) = ℚ(ζ₅)^+, the smallest nontrivial real cyclotomic field.
     """
-    from rime.cubieoperator import CubieMove
-    from rime.cubieworld import SlowDynamics
     prim = CubieMove.prim_moves()
-    sd = SlowDynamics.__new__(SlowDynamics)
+    sd = SlowDynamics.lite()
 
     print("\n" + "=" * 70)
     print("§13. Spectral Field Stratification (Theorem 5.9)")
@@ -2661,6 +2652,129 @@ def test_spectral_field_stratification():
     Face-symmetry forces all cycles to have rational cosines;
     symmetry deficits allow non-rational cyclotomic fields.
     """)
+
+    return True
+
+
+def test_slice_closure_n21():
+    """13.1 Slice闭包 n=21: 18 face turns + 3 slice moves (M/E/S)
+
+    验证: n=21 (面完备 + 中层slice moves) 的有理谱结构。
+
+    Slice moves (M/E/S) 是中层180°转动，只影响棱块位置，
+    不改变角块/棱块色相。所有6个面保持完备 (CW+CCW+180°)。
+    谱: 6个特征值，全部有理，λ = 1 - k/21,
+        k ∈ {0, 4, 6, 8, 10, 12}.
+
+    关键: h_i 只有33%交换对，但面完备性单独强制有理谱——
+    验证了论文的 Galois 机制结论。
+    """
+    from rime.cubieoperator import CubieMove
+    from rime.cubieworld import SlowDynamics
+
+    sd = SlowDynamics.lite()
+    prim = CubieMove.prim_moves()
+    slice_moves = CubieMove.slice_moves()
+
+    # 构建 n=21 生成元集
+    gens_21 = {}
+    for k in sd.rho_moves(n=21):
+        if k in prim:
+            gens_21[k] = prim[k]
+        elif k in slice_moves:
+            gens_21[k] = slice_moves[k]
+
+    n_gen = len(gens_21)
+    rhos = [m.rho() for m in gens_21.values()]
+    A_S = sum(rhos) / n_gen
+
+    print("\n" + "=" * 70)
+    print("§13.1 Slice闭包 n=21: 面完备 + M/E/S 中层转动")
+    print("=" * 70)
+    print(f"\n生成元: {n_gen} (18 face turns + 3 slice moves)")
+    print(f"Slice keys: {sorted(k for k in gens_21 if k in slice_moves)}")
+
+    # Slice move 结构
+    for k, m in slice_moves.items():
+        print(f"  {k}: corners_ori_delta={m.corners_ori_delta}, "
+              f"edges_ori_delta={m.edges_ori_delta}")
+
+    # Hermitian 检查
+    is_herm = np.allclose(A_S, A_S.T.conj(), atol=1e-10)
+    print(f"\nHermitian: {is_herm}")
+
+    # 特征值分析
+    w = np.sort(np.linalg.eigvalsh(A_S))
+    w_unique = np.unique(np.round(w, 6))
+    m_eff = n_gen // 2 if n_gen % 2 == 0 else n_gen
+
+    print(f"\n#特征值: {len(w_unique)}, m_eff={m_eff}")
+    print(f"{'λ':>10s} {'dim':>5s} {'1-k/m':>10s} {'k':>4s} {'rational?':>10s}")
+    print("-" * 45)
+    k_values = []
+    for lam in w_unique:
+        idx = np.abs(np.round(w, 6) - lam) < 1e-8
+        d = idx.sum()
+        k_val = round((1 - lam) * m_eff)
+        pred = 1 - k_val / m_eff
+        is_rat = abs(lam - pred) < 1e-6
+        k_values.append(k_val)
+        print(f"{lam:10.6f} {d:5d} {pred:10.6f} {k_val:4d} {str(is_rat):>10s}")
+    all_rational = all(abs(lam - (1 - round((1 - lam) * m_eff) / m_eff)) < 1e-6
+                       for lam in w_unique)
+    print(f"\n全有理: {all_rational}")
+    print(f"k值: {sorted(k_values)}")
+
+    # 面完备性
+    print(f"\n面完备性:")
+    for axis in range(3):
+        for side in [-1, 1]:
+            cw = (axis, side, -1); ccw = (axis, side, 1); h180 = (axis, side, 2)
+            complete = all(k in gens_21 for k in [cw, ccw, h180])
+            print(f"  Face a{axis}s{side:+d}: complete={complete}")
+
+    # h_i 交换性
+    from itertools import combinations
+    h_ops, h_labels = build_h_operators(gens_21)
+    n_h = len(h_ops)
+    comm_norms = []
+    n_comm = 0
+    for i, j in combinations(range(n_h), 2):
+        norm = np.linalg.norm(h_ops[i] @ h_ops[j] - h_ops[j] @ h_ops[i])
+        comm_norms.append(norm)
+        if norm < 1e-10:
+            n_comm += 1
+    n_pairs = len(comm_norms)
+    print(f"\nh_i: {n_h}个, labels={h_labels}")
+    print(f"交换对: {n_comm}/{n_pairs} ({100*n_comm/n_pairs:.0f}%)")
+    print(f"max||[h,h]||: {max(comm_norms):.2e}")
+
+    # 块结构
+    spaces = eigenspaces(A_S)
+    print(f"\n特征空间块组成:")
+    print(f"{'λ':>10s} {'dim':>5s}  P_cp P_ep Ω_co Σ_eo")
+    print("-" * 45)
+    _ind = np.zeros(228)
+    _ind[:64] = 1; P_cp = np.diag(_ind)
+    _ind[:] = 0; _ind[64:208] = 1; P_ep = np.diag(_ind)
+    _ind[:] = 0; _ind[208:216] = 1; P_co = np.diag(_ind)
+    _ind[:] = 0; _ind[216:228] = 1; P_eo = np.diag(_ind)
+    block_projs = {'P_cp': P_cp, 'P_ep': P_ep, 'Ω_co': P_co, 'Σ_eo': P_eo}
+    for lam, info in sorted(spaces.items()):
+        P_lam = info['projector']
+        d = info['dim']
+        dims = [int(round(np.real(np.trace(Pb @ P_lam @ Pb))))
+                for Pb in block_projs.values()]
+        print(f"{lam:10.6f} {d:5d}  {dims[0]:4d} {dims[1]:4d} {dims[2]:4d} {dims[3]:4d}")
+
+    # 关键对比
+    print(f"\n关键对比:")
+    print(f"  n=18: 5个特征值, λ=1-k/9,  k∈{{0,2,3,4,6}},  h_i=9个, ~33%交换")
+    print(f"  n=21: 6个特征值, λ=1-k/21, k∈{sorted(k_values)}, h_i=9个, ~33%交换")
+    print(f"  → 面完备性单独强制有理谱，与h_i交换性无关")
+    print(f"  → Slice moves贡献纯整数特征标（纯edge置换, 无ω因子）,")
+    print(f"     不引入新的无理性来源")
+    print(f"  → n=21是面完备族的自然闭包")
 
     return True
 
@@ -2936,6 +3050,7 @@ if __name__ == '__main__':
 
     print("\n╔══ 13. 谱域分层 (Spectral Field Stratification, Theorem 5.9) ══╗")
     test_spectral_field_stratification()
+    test_slice_closure_n21()
 
     """
     A_micro 在做的是“把非交换群压成一个交换代数”

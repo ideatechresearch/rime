@@ -26,9 +26,10 @@ rime/
 test/
 ├── test_cube.py          # 魔方贴纸级基础操作测试
 ├── test_cubie.py        # 魔方块级基础操作测试
-├── test_cubieoperator.py # 群表示论实验（5个分组）
-├── test_cubieworld.py   # 慢动力学实验（13个分组）
-└── test_circular.py     # 环形数据结构实验（11个分组）
+├── test_cubieoperator.py # 群表示论实验（13个分组）
+├── test_cubieworld.py   # 慢动力学实验（25个分组）
+├── test_circular.py     # 环形数据结构实验（11个分组）
+└── test_allele.py       # ABO血型遗传学实验（16个分组）
 ```
 
 ## 主要模块
@@ -520,6 +521,7 @@ python test/test_cubie.py
 python test/test_cubieoperator.py
 python test/test_cubieworld.py
 python test/test_circular.py
+python test/test_allele.py
 ```
 
 ### 魔方贴纸级操作

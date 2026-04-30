@@ -1034,6 +1034,20 @@ class CubieMove:
             # for direction in (-1, +1, +2):
             slice_moves[(axis, 0, 2)] = cls.from_rotation(axis, 0, 2)
         return slice_moves
+    
+    @class_property('INVERSE_INDICES')
+    def inverse_indices(cls) -> list[int]:
+        """返回 18 个基本 move 的逆元 index 映射: inverse_indices[i] = j ⇔ g_j = g_i⁻¹"""
+        prim = cls.prim_moves()
+        gen = cls.basic_generators()
+        result = [-1] * len(gen)
+        for i, k in enumerate(gen):
+            inv = prim[k].inverse()
+            for j, k2 in enumerate(gen):
+                if inv == prim[k2]:
+                    result[i] = j
+                    break
+        return result
 
     @class_cache('STICKER_MOVES', key=lambda n: n)
     @classmethod
@@ -2154,6 +2168,7 @@ class CycleLibrary:
 class CubieBase(CubeBase):
     """群论态（搜索）"""
     AXIS_NAME = ('X', 'Y', 'Z')
+    SOLVED_STATE = CubieState.solved()
 
     def __init__(self, n: int = 3):
         super().__init__(n)
@@ -2574,7 +2589,7 @@ class CubieBase(CubeBase):
 
             h = max(cls.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
                     cls.UD_PRUNE[coord.ud_slice])  # admissible phase1_heuristic（reference）
- 
+
             if coord.is_solved():  # EO=0, CO=0, UD-slice=solved, current_state.is_ud_slice_separated()
                 print('phase1_search', depth, h, coord.ud_slice)  # 69,current_state.ud_slice_coord()
                 return []  # 判断 phase1 solved
@@ -2782,7 +2797,7 @@ class CubieBase(CubeBase):
         path2, mv2, cubie2 = cls.solve_phase2(cubie15, phase2_start, phase2_end)
         assert cubie2.is_phase2_solved(), f'Phase2 invalid: len={len(path2)}, state={cubie2}'
 
-        assert cubie2 == CubieState.solved(), f'Not fully solved,state:{cubie2}'
+        assert cubie2 == cls.SOLVED_STATE, f'Not fully solved,state:{cubie2}'
         return [a for a, _ in path1 + path15 + path2], mv1.compose(mv15).compose(mv2)
 
     def solve_sticker(self, state: np.ndarray) -> list[tuple]:
@@ -2826,7 +2841,6 @@ class CubieBase(CubeBase):
               f'solved={self.is_solved(s0)} corr={len(correction)}')
         return act
 
-
     def build_symmetry_data(self):
         """预计算每种对称的 color_perm 和 inv_move_map
         color_perm[c] = σ(c): 将 apply_symmetry 后的贴纸颜色映射回标准中心
@@ -2857,7 +2871,7 @@ class CubieBase(CubeBase):
             for key_orig in prim:
                 # 原始 move 作用于 solved → 贴纸 → 对称变换 → color_perm → cubie
                 c_orig = move_results[key_orig]
-                s_sticker = self.idx_to_state(c_orig.to_sticker())
+                s_sticker = CubeBase.idx_to_state(c_orig.to_sticker())
                 s_sym = CubeBase.apply_symmetry(s_sticker, sym_id)
                 c_sym = self.to_cubie(color_perm[s_sym])
                 # 匹配: 哪个 prim move 产生同样的 cubie 状态？
@@ -3376,42 +3390,36 @@ class CubieBase(CubeBase):
         return current
 
     @classmethod
-    def cubie_distance(cls, s: CubieState) -> tuple:
+    def cubie_distance(cls, s: CubieState) -> tuple[int, int]:
         """
         自动判断当前状态属于哪个阶段，并返回对应的距离下界（heuristic）
-        get_phase_and_prune_distance_to_solved
-        返回: (phase: int, distance: float)
-        then hybrid: hybrid_d = w1 * d1 + w2 * d2
-        slow space 不看 parity
+        返回: (phase: int, distance: int)  phase 0=solved, 1=Phase-1, 2=Phase-2, 3=orientation
         """
         if not hasattr(cls, 'CO_EO_PRUNE'):
-            cls.build_pruning_table()
+            cls.build_pruning_table()            
 
-        solved = CubieState.solved()
-        if s == solved:
+        if s == cls.SOLVED_STATE:
             return 0, 0
 
-        # Phase-1 判断（最优先）
-        if not s.is_phase1_solved():
-            # 用 Phase-1 坐标距离（EO + CO + UD-slice）
-            coord = Phase1Coord.project(s)
-            d1 = max(
-                cls.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
-                cls.UD_PRUNE[coord.ud_slice]
-            )
+        # Phase-1: 一次计算 co/eo，避免 is_phase1_solved + project 重复遍历
+        co = s.corner_ori_coord()
+        eo = s.edge_ori_coord()
+        if co != 0 or eo != 0 or not s.is_ud_slice_separated():
+            ud = s.ud_slice_coord()
+            d1 = max(cls.CO_EO_PRUNE[co, eo], cls.UD_PRUNE[ud])
             return 1, d1
 
-        # Phase-2 判断（Phase-1 已解决）
-        if not s.is_phase2_solved():  # 假设你有这个方法：CP/EP/UD-slice-perm 是否 solved
+        # Phase-2: Phase-1 已解决，检查 permutation
+        if not s.is_phase2_solved():
             coord = Phase2Coord.project(s)
             d2 = max(
                 cls.CO_PRUNE[coord.corner_perm],
                 cls.EDGE_PRUNE[coord.edge_perm],
-                cls.SLICE_PRUNE[coord.ud_slice_perm]
+                cls.SLICE_PRUNE[coord.ud_slice_perm],
             )
             return 2, d2
 
-        return 3, s.orientation_distance  # solve_length/ida_star/phase1_dist
+        return 3, s.orientation_distance
 
     @staticmethod
     def generate_cubie(length: int = 50, left: bool = False, check: bool = False) -> CubieState:
@@ -3435,13 +3443,6 @@ class CubieBase(CubeBase):
         assert state.is_solvable()
         return state
 
-    @staticmethod
-    def generate_cubie_pair(depth_range: tuple = (0, 30)) -> tuple:
-        depthA = np.random.randint(*depth_range)
-        depthB = np.random.randint(*depth_range)
-        stateA = CubieBase.generate_cubie(depthA)
-        stateB = CubieBase.generate_cubie(depthB)
-        return stateA, stateB
 
     @staticmethod
     def generate_cubie_rho(max_depth: int = 27, sigma: float = 1.0) -> np.ndarray:

@@ -1,5 +1,5 @@
-import numpy as np  # 导入 NumPy 库，用于数值计算和处理多维数组
-import pygame  # 导入 Pygame 库，用于游戏开发和图形界面设计
+import numpy as np
+import pygame
 import math, random
 from rime.cube import StickerCube, CubeBase
 from rime.cubie import CubieBase

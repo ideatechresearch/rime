@@ -9,9 +9,10 @@ sys.path.insert(0, '.')
 import numpy as np
 from rime.cubieoperator import *
 from rime.cubieworld import SlowDynamics
+from rime.helpers import is_in_qsqrt5, is_rational_form
 
 prim = CubieMove.prim_moves()
-sd = SlowDynamics.__new__(SlowDynamics)
+sd = SlowDynamics.lite()
 
 # Block projectors (full 228×228 matrices)
 _ind = np.zeros(228)
@@ -39,25 +40,6 @@ for n, desc in [(8, 'n=8 (mixed)'), (10, 'n=10 (partial)'), (16, 'n=16 (incomple
     rm = sd.rho_moves(n=n)
     if len(rm) > 0:
         gens_sets[desc] = {k: prim[k] for k in rm if k in prim}
-
-
-def eigenspaces(A, tol=1e-6):
-    """Return dict: eigenvalue -> {'dim': int, 'projector': ndarray}"""
-    if np.allclose(A, A.T.conj(), atol=1e-10):
-        w, V = np.linalg.eigh(A)
-    else:
-        w_raw, V_raw = np.linalg.eig(A)
-        mask = np.abs(np.imag(w_raw)) < 1e-8
-        w, V = np.real(w_raw[mask]), V_raw[:, mask]
-    w_rounded = np.round(w, 6)
-    unique_w = np.unique(w_rounded)
-    result = {}
-    for lam in unique_w:
-        idx = np.where(w_rounded == lam)[0]
-        V_lam = V[:, idx]
-        P_lam = V_lam @ V_lam.T.conj()
-        result[lam] = {'dim': len(idx), 'projector': P_lam}
-    return result
 
 
 print("=" * 100)
@@ -339,28 +321,6 @@ print("  n=16: two eigenvalues in ℚ(√5): (11 ± √5)/16")
 print()
 
 
-def _is_in_qsqrt5(lam, tol=1e-5):
-    """Check if λ ∈ ℚ(√5): λ = (p + q√5)/r for small integers p,q,r with q≠0.
-
-    Returns (True, (p, q, r)) if found, else (False, None).
-    """
-    sqrt5 = np.sqrt(5)
-    for p in range(-20, 21):
-        for q in range(-20, 21):
-            if q == 0:
-                continue
-            for r in range(1, 21):
-                val = (p + q * sqrt5) / r
-                if abs(lam - val) < tol:
-                    return True, (p, q, r)
-    return False, None
-
-
-def _is_rational_form(lam, m_eff, tol=1e-5):
-    """Check if λ ≈ k/m_eff for some integer k (0 ≤ k ≤ m_eff)."""
-    return abs(lam - round(lam * m_eff) / m_eff) < tol
-
-
 # Determine m_eff for each set from the number of generators
 # (same logic as in _exp_spectral_figures.py)
 m_eff_map = {}
@@ -384,10 +344,10 @@ for name in gens_sets:
     higher_eigs = []
 
     for lam in eigs:
-        if _is_rational_form(lam, m_eff):
+        if is_rational_form(lam, m_eff):
             rational_eigs.append(lam)
         else:
-            found, expr = _is_in_qsqrt5(lam)
+            found, expr = is_in_qsqrt5(lam)
             if found:
                 sqrt5_eigs.append((lam, expr))
             else:
@@ -419,9 +379,9 @@ for name in gens_sets:
     m_eff = m_eff_map[name]
 
     for lam in eigs:
-        if _is_rational_form(lam, m_eff):
+        if is_rational_form(lam, m_eff):
             continue
-        found, expr = _is_in_qsqrt5(lam)
+        found, expr = is_in_qsqrt5(lam)
         if found:
             p, q, r = expr
             d = spaces[lam]['dim']
@@ -442,9 +402,9 @@ for name in gens_sets:
     m_eff = m_eff_map[name]
 
     for lam in eigs:
-        if _is_rational_form(lam, m_eff):
+        if is_rational_form(lam, m_eff):
             continue
-        found, expr = _is_in_qsqrt5(lam)
+        found, expr = is_in_qsqrt5(lam)
         if found:
             continue
         # Check if it's rational in a different form

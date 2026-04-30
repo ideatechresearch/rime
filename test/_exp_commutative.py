@@ -7,39 +7,10 @@ sys.path.insert(0, '.')
 import numpy as np
 from rime.cubieoperator import *
 from rime.cubieworld import SlowDynamics
-from rime.cube import ActionToken
 from itertools import combinations
 
 prim = CubieMove.prim_moves()
-sd = SlowDynamics.__new__(SlowDynamics)
-
-
-def build_h_operators(gens_dict):
-    """Construct all available h_i = (g + g^{-1})/2 symmetric units"""
-    h_ops = []
-    h_labels = []
-    # 6 true inverse pairs (CW/CCW)
-    for axis in range(3):
-        for side in [-1, 1]:
-            cw_key = (axis, side, -1)
-            ccw_key = (axis, side, 1)
-            if cw_key in gens_dict and ccw_key in gens_dict:
-                h = (gens_dict[cw_key].rho() + gens_dict[ccw_key].rho()) / 2
-                h_ops.append(h)
-                at_cw = str(ActionToken.from_cubie_move(*cw_key, n=3))
-                at_ccw = str(ActionToken.from_cubie_move(*ccw_key, n=3))
-                h_labels.append(f"({at_cw}+{at_ccw})/2")
-    # 3 axis-level 180 deg pairs (convention, not inverse pairs)
-    for axis in range(3):
-        keys_180 = [(axis, side, 2) for side in [-1, 1]
-                    if (axis, side, 2) in gens_dict]
-        if len(keys_180) == 2:
-            h = (gens_dict[keys_180[0]].rho() + gens_dict[keys_180[1]].rho()) / 2
-            h_ops.append(h)
-            at_a = str(ActionToken.from_cubie_move(*keys_180[0], n=3))
-            at_b = str(ActionToken.from_cubie_move(*keys_180[1], n=3))
-            h_labels.append(f"({at_a}+{at_b})/2")
-    return h_ops, h_labels
+sd = SlowDynamics.lite()
 
 
 def commutativity_measures(h_ops):
