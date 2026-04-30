@@ -100,279 +100,100 @@ class SlowDynamics:
     7.  --------------------------------
         动力学三阶段（Three Regimes）
         --------------------------------
+        — 量化验证：Exp 20（regime 可分性，N=750）、Exp 21（动力学统计，N≈600）、Exp 22（因果，N=500）、Exp 23（轨迹规划）—
 
-        (1) Far Regime（远区）
-            • radial 主导
-            • potential 强
-            • move ranking 有效
+        (1) Far Regime（远区，‖tz‖ ≥ 4.0）
+            • radial 主导（radial mean η²=0.939, ANOVA across regimes）
+            • potential 强，梯度信号明确
+            • move 熵 H=2.81±0.07（接近 H_max=log18≈2.89，全方向探索）
+            • 2-cycle rate = 1.5%（极少对称捕获）
             • 类似连续梯度下降
 
-        (2) Mixing Regime（中区）
-            • radial 与 tangential 竞争
-            • anisotropy 上升
-            • 出现不稳定路径
-            • 距离开始失效
+        (2) Mid Regime（中区，1.5 ≤ ‖tz‖ < 4.0）
+            • radial 与 tangential 竞争（tangential mean η²=0.885）
+            • anisotropy 上升，路径不稳定
+            • move 熵 H=2.51±0.09（有效方向缩减）
+            • 2-cycle rate = 10.0%（对称开始出现）
+            • 距离信号衰减
 
-        (3) Near-Target Regime（近区）【关键难点】
-            • radial → 0
-            • potential → 平坦
-            • tangential / rot 主导
-            • energy landscape collapse（能量退化）
+        (3) Near-Target Regime（近区，‖tz‖ < 1.5）【关键难点】
+            • radial → 0，potential → 平坦
+            • tangential / rot 主导（rot mean η²=0.660）
+            • move 熵 H=2.44±0.01（决策空间严重萎缩）
+            • **2-cycle rate = 97.8%**（近确定性 g↔g⁻¹ 振荡）
+            • inv-in-top-3 = 100%（逆 move 始终在最优候选）
+            • **iso-distance shell**（Exp 23）：18 个 move 的 E_base ~相同
+              → 打破 2-cycle 也无法改善距离（2-step MPC 0% 2-cycle，但 ‖tz‖ 不变）
+
+        → 本质：连续优化 → 离散群轨道动力学 的相变
+        → 2-cycle 是 near-regime 几何退化的**症状**，不是 stall 的**原因**
+        → 所有 move 在近区等价（嵌入空间的退化），不是 per-move myopia 能解释的
 
         慢流形 = “高斯外观的连续空间 + 强离散群轨道骨架 + 局部对称子流形”的混合动力系统
-        在动力学上仍保留强烈的群轨道结构 + 对称性约束 + 周期闭包
-        远区像连续梯度下降，近区退化为群的对称轨道动力学，容易被 2-cycle / involution / dir==2 等对称吸引子捕获。
-        • 远区：在高维球面上走“最短大圆路径”
-        • 近区：进入“环形轨道”，绕目标旋转
+        远区像连续梯度下降，近区退化为群的对称轨道动力学
 
-        → 本质是：
-            连续优化 → 离散群轨道动力学 的相变
+    8. 几何-行为因果（Causal Geometry → Behavior）
+        — Exp 22（Cohen's d, all p<10⁻⁴）—
 
-    8. 空间几何层（Level 1）
+        | 几何特征          | d（2-cycle vs non） | 方向                       |
+        |-------------------|---------------------|----------------------------|
+        | curvature         | **+1.42**           | 高弯曲 → 更多 2-cycle        |
+        | anisotropy        | +1.35               | 高各向异性 → 更多 2-cycle     |
+        | tangential σ      | +1.38               | 切向波动大 → 更多 2-cycle     |
+        | ‖tz‖              | **-1.64**           | 远距离 → 少 2-cycle          |
+        | radial (best)     | -1.27               | 强径向 → 少 2-cycle          |
+
+        一致模式：几何”扭曲”区域易陷入 2-cycle，强径向 + 远距离提供保护。
+
+    9. 空间几何层（Level 1）
         • 统计外观：近似高维高斯球
             ○ 平均距离稳定在 6.1~6.2（与 √2σ√d ≈ 6.16 高度吻合）
-            ○ 但本质不是连续高斯，而是“离散轨道在连续投影下的统计平滑”
+            ○ 但本质不是连续高斯，而是”离散轨道在连续投影下的统计平滑”
         • 壳层结构（Energy Shells）
             ○ 距离呈现明显分层：0.0 / ~1.1 / ~3.6 / ~5.4 / ~6.1…
             ○ 这是 group word-length quantization 在慢流形上的投影体现
-            每层对应不同的有效 orbit 复杂度
 
-        连续嵌入上的离散群动力系统
-
-        核心困难来自：
-
-            “对称性 + 投影信息丢失 + 轨道结构”
-
-    使用方式：
-        model = SlowDynamics(A_micro)
-        z = model.project(state.to_rho())
-        z_t = model.evolve(z, T)
-        x_t = model.reconstruct(z_t)
-    9.发现的关键现象 / 困难
-
-    壳层结构：距离分层（0 / 1.1 / 3.6 / 5.4 / 6.1…），word-length quantization 效应。
-    2-cycle orbit：g ↔ g⁻¹ 反复打转（最顽固）。
-    dir==2 / Z轴对称陷阱：radial / rot 信号极弱，energy 平坦。
-    metric 主导：二次几何项压制 potential，导致近区退化。
-    近目标区退化：radial→0，potential 消失，搜索进入对称子流形。
-
-    λ 层不是数值现象，而是代数定理
-    18 个 generator 的谱
-    | λ   | 维度 | 含义     |
-    | --- | -- | ------ |
-    | 1   | 24 | 守恒宏观变量 | 合法状态约束
-    | 7/9 | 44 | 慢模态    | 真实慢模态
-    | 2/3 | 32 | 次慢     |
-    | 5/9 | 96 | 中速     |
-    | 1/3 | 32 | 快速衰减   |
-    12 generators 的谱
-    1.0        24
-    5/6        36
-    4/6        68
-    3/6        68
-    2/6        24
-    0.0        8
-
-    Slow dynamics model for Rubik's Cube Phase-1 transition operator.
-
-    The construction exploits the spectral structure of the averaged
-    generator action in the cubie representation. Empirically the
-    transition operator exhibits strong spectral stratification with
-    a small number of highly degenerate eigenvalue layers.
-    Averaging Rubik generators produces a Laplacian whose spectrum follows a universal linear form λ = 1 − k/m determined solely by the number of generator axes.
-    ---------------------------------------------------------------------
-    1. Operator definition
-    ---------------------------------------------------------------------
-
-    Let ρ(g) be the cubie representation of a generator g.
-
-        A = (1 / |S|) ∑_{g ∈ S} ρ(g)
-
-    This averaged operator describes the random walk over the
-    generator set S.
-
-    The resulting operator acts on a 228-dimensional representation
-    space but its effective dynamics are much lower dimensional.
-
-    ---------------------------------------------------------------------
-    2. Spectral stratification
-    ---------------------------------------------------------------------
-
-    The spectrum forms a small number of rational eigenvalue layers.
-
-    For the full 18-generator set:
-
-        λ = 1 − k/9 ,   k ∈ {0,2,3,4,6}
-
-        λ     dim      interpretation
-        --------------------------------
-        1     24       exact invariant subspace
-        7/9   44       slow modes
-        2/3   32       intermediate slow
-        5/9   96       fast mixing
-        1/3   32       rapidly decaying
-
-    Total dimension = 228.
-
-    Similar rational spectra appear for other generator subsets:
-
-    12 generators
-        1, 5/6, 4/6, 3/6, 2/6, 0
-
-    10 generators
-        1, 4/5, 3/5, 2/5, 1/5
-
-    6 generators
-        1, 2/3, 1/3
-
-    These spectra indicate that the averaged operator lives in a
-    low-dimensional commutative algebra generated by the symmetric
-    combination of generators.
-
-    ---------------------------------------------------------------------
-    3. Slow manifold truncation
-    ---------------------------------------------------------------------
-
-    The dominant dynamics lie in the top spectral layers
-
-        λ ≥ 2/3
-
-    giving
-
-        24 + 44 + 32 = 100 dimensions
-
-    The remaining
-
-        128 dimensions
-
-    correspond to the fast chaotic bulk.
-
-    Thus the dynamics naturally split into
-
-        slow manifold : 100 dim
-        fast manifold : 128 dim
-
-    Fast modes satisfy
-
-        |λ| ≤ 5/9
-
-    and decay exponentially.
-
-    slow spectrum contains discrete symmetry sectors
-
-    ---------------------------------------------------------------------
-    4. Approximate invariance
-    ---------------------------------------------------------------------
-
-    The slow space is not strictly invariant.
-
-        ρ(g) V_slow ⊆ V_slow + leakage
-
-    empirical generator leakage:
-
-        ≈ 0.42 – 0.46
-
-    However the leaked components lie in the fast spectrum and
-    decay quickly under iteration of A.
-
-    Therefore V_slow behaves as a
-
-        quasi-invariant Markov subspace.
-
-    Truncation to the slow manifold produces very small long-term error:
-
-        T = 100 steps
-        relative error < 6 × 10⁻⁷
-
-    ---------------------------------------------------------------------
-    5. Effective dynamical dimension
-    ---------------------------------------------------------------------
-
-    Although the operator acts on a 228-dimensional space,
-    the effective dynamics are extremely low rank.
-
-    Observations:
-
-        generator span dimension ≈ 5–6
-        slow operator rank ≈ 5–6
-
-    Therefore the dynamics are controlled by only a few
-    macroscopic time scales.
-
-    Phase-1 mixing effectively contains
-
-        ≈ 5 characteristic eigenvalues.
-
-    ---------------------------------------------------------------------
-    6. Mixing behaviour
-    ---------------------------------------------------------------------
-
-    Fast spectrum radius:
-
-        ρ_fast = 5/9
-
-    implying exponential contraction.
-
-    Approximate mixing time:
-
-        tmix ≈ log(10⁶) / log(9/5)
-             ≈ 20 – 23 steps
-
-    After this scale the dynamics are dominated by λ₂.
-    fast subspace decay time scale
-
-    ---------------------------------------------------------------------
-    7. Structural interpretation
-    ---------------------------------------------------------------------
-
-    The observed behaviour can be interpreted as
-
-        statistical spectral stratification
-
-    produced by averaging the group representation over generators.
-
-    Key properties:
-
-        • strong eigenvalue degeneracy
-        • small commutative operator algebra
-        • low effective rank
-        • slow/fast spectral separation
-
-    Only the λ = 1 layer corresponds to a true group invariant
-    subspace. The remaining layers arise from statistical symmetry
-    of the averaged operator.
-
-    ---------------------------------------------------------------------
-    8. Algorithmic implications
-    ---------------------------------------------------------------------
-
-    This structure enables efficient reduced models:
-
-        228 → 100 slow manifold
-
-    and further low-rank representations.
-
-    The slow operator admits a decomposition of the form
-
-        A ≈ Σ λ_i P_i
-
-    where P_i are a small set of projection operators.
-
-    This low-rank structure also admits an interpretation
-    similar to attention-style decompositions of the operator.
-
-    ---------------------------------------------------------------------
-    Summary
-
-    Rubik Cube Phase-1 slow dynamics exhibit
-
-        group-averaged operator
-        + spectral layering
-        + quasi-invariant slow manifold
-        + low-rank effective dynamics
-
-    enabling accurate reduced-dimension simulation of the
-    Markov evolution.
+    10. 诊断性而非预测性（Diagnostic, Not Predictive）
+        — Exps 14–23 的核心结论 —
+
+        ✔ 慢流形是有效的**诊断工具**：
+          · d_slow 在近区与 prune distance 相关（r≈0.5 at d≤5）
+          · 壳层结构解释了局部贪心搜索的距离阶梯
+          · 三区相变解释了为何搜索在目标附近停转
+          · Lie curvature 显示慢投影压制非交换性 ~10–100×
+
+        ✘ 但不能提供**预测性** move 排序：
+          · E_geom α-sweep：最优 α=0（任意几何权重严格劣化排序）
+          · 二次型 E_geom 放大不一致性而非修复
+          · 2-step MPC（Exp 23）：完全消除 2-cycle 但 ‖tz‖ 不变
+          · 问题不在 per-move myopia，而在嵌入空间本身缺乏群论信息
+
+        使用方式：
+            model = SlowDynamics(A_micro)
+            z = model.project(state.to_rho())
+            z_t = model.evolve(z, T)
+            x_t = model.reconstruct(z_t)
+        API（详见 Appendix C）：
+            model.project(x) / model.lift(z)    — 228D ↔ 76D 投影
+            model.move_scores(z, goal)           — 5-component 几何分解
+            model.move_energy(z, goal, prev_dz)  — three-regime 能量
+            model.lie_curvature(z)               — 局部群弯曲度
+            model.chaos_signature(z)             — 非交换性指纹
+            CubieMove.inverse_indices()          — 18-generator 逆索引映射
+
+    ── 谱表（18 / 12 generators）─────────────────────────────────────────
+    | λ   | dim | 含义              |  12-gen λ  | dim |
+    | 1   | 24 | 守恒 / 合法状态     |  1.0       | 24  |
+    | 7/9 | 44 | 真实慢模态         |  5/6       | 36  |
+    | 2/3 | 32 | 次慢              |  4/6       | 68  |
+    | 5/9 | 96 | 中速混合           |  3/6       | 68  |
+    | 1/3 | 32 | 快速衰减           |  2/6       | 24  |
+    | —   | —  | —                 |  0.0       | 8   |
+
+    λ = 1 − k/m 的代数有理谱来自 partition integrality [1]，不是数值巧合。
+    slow/fast split: λ ≥ 2/3 (100D) vs λ ≤ 5/9 (128D), tmix ≈ log(10⁶)/log(9/5) ≈ 23.
+    slow manifold is quasi-invariant: generator leakage 0.42–0.46, T=100 error < 6×10⁻⁷.
+    effective dynamics rank ≈ 5–6, controlled by a small commutative semisimple algebra C[A] ≅ C⁵.
     """
 
     def __init__(self, n: int = N_GENERATORS, threshold: float = 2 / 3, tol=1e-6, eps=1e-6, rho_moves=None, k_slow=-1):

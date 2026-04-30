@@ -2180,15 +2180,15 @@ def test_dynamical_statistics():
 
     from rime.cubie import CubieMove
     inverse_map = CubieMove.inverse_indices()
-    for i, j in inverse_map.items():
-        assert inverse_map.get(j) == i, f"Inverse map inconsistent: {i}→{j} but {j}→{inverse_map.get(j)}"
+    for i, j in enumerate(inverse_map):
+        assert inverse_map[j] == i, f"Inverse map inconsistent: {i}→{j} but {j}→{inverse_map[j]}"
 
     print(f"\n{'='*70}")
     print("Exp 21: Dynamical Statistics — Orbit & Symmetry")
     print(f"{'='*70}")
     print(f"  Inverse pairs: ", end="")
     inv_pairs = set()
-    for i, j in inverse_map.items():
+    for i, j in enumerate(inverse_map):
         if i <= j:
             inv_pairs.add((i, j))
     print(", ".join(f"({i},{j})" for i, j in sorted(inv_pairs)))
@@ -2225,7 +2225,7 @@ def test_dynamical_statistics():
                 best_next = int(np.argmin(E_base_next))
 
                 # 2-cycle 检测：best_next 是否是 best_move 的逆
-                is_2cycle = (inverse_map.get(best_move, -1) == best_next)
+                is_2cycle = (inverse_map[best_move] == best_next)
 
                 # move entropy
                 e_shifted = E_base - np.min(E_base)
@@ -2234,7 +2234,7 @@ def test_dynamical_statistics():
                 H = -np.sum(p * np.log(p))
 
                 # 逆对优势比：最优 move 和 its inverse 在 top-k 中占比
-                inv_of_best = inverse_map.get(best_move, -1)
+                inv_of_best = inverse_map[best_move]
                 top3 = np.argsort(E_base)[:3]
                 inv_in_top3 = inv_of_best in top3
 
@@ -2446,7 +2446,7 @@ def test_geometry_behavior_correlation():
         E_next = np.linalg.norm(Uz_next - z_solved, axis=1)
         best_next = int(np.argmin(E_next))
 
-        is_2cycle = (inverse_map.get(best_move, -1) == best_next)
+        is_2cycle = (inverse_map[best_move] == best_next)
 
         # orbit 检测（k=8 步）
         k_steps = 8
