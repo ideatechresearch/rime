@@ -527,6 +527,7 @@ class RubiksCubeDraw:
 if __name__ == "__main__":
     # 如果脚本被直接运行，则执行主函数
     # CubeDraw.main()
+    random.seed(42)  # 固定随机种子以获得可重复的 scramble
 
     cube = StickerCube(n=3)  # 初始解法状态
     # mv = cube.scramble(20)

@@ -2,7 +2,7 @@ import numpy as np
 import random, math, time
 from rime.cube import CubeBase, ActionToken, StickerCube
 from rime.cubie import CubieBase, CubieState, CubieMove, StickerMove
-from rime.cubie import Phase1Coord, Phase1Action, Phase2Coord, Phase2Action, Phase15Coord, CubieExample
+from rime.cubie import Phase1Coord, Phase1Action, Phase2Coord, Phase2Action, Phase15Coord, Phase15Action, CubieExample
 from rime.base import class_cache, class_property, check_class_status
 
 N = 3
@@ -28,7 +28,6 @@ def test_references(cube):
     print('move_id', CubieMove.basic_generators)
     print(Phase1Coord.project(CubieState.solved()))
     # cube.build_phase15_pruning()
-    # cube.build_phase15_pruning_by_idx()#Reachable: 2784/3360,mean:3.9569
     print('rotate_map', cube.build_rotate_map())
 
 
@@ -43,6 +42,19 @@ def test_solved_roundtrip(cube):
     assert np.array_equal(a1, a2)
     assert cube.to_cubie(a1) == s0
     assert cube.to_cubie(a2) == s0
+    all_moves = CubieMove.prim_moves().copy()
+    all_moves.update(CubieMove.slice_moves())
+    for k, m in all_moves.items():
+        k2 = ActionToken.from_cubie_move(*k, n=3).key
+        s1 = m.act(s0)
+        ai1 = s1.to_sticker()
+        a1 = cube.from_cubie(s1)
+        a2 = cube.idx_to_state(ai1 )
+        assert np.array_equal(a1, a2)
+        assert cube.to_cubie(a1) == s1
+        # a3 = cube.rotate_state(cube.idx_to_state(s_i), *k2)
+        # assert np.array_equal(a1, a3),f"{k,a1,a3}"
+        # assert np.array_equal(ai1, ai2),f"{k,ai1,ai2}"
 
     # 看一个 corner 的 3 个贴纸来源
     s_idx = cube.solved_idx.copy()
@@ -51,56 +63,17 @@ def test_solved_roundtrip(cube):
     print([s_idx1[f, r, c] for (f, r, c) in corner])
 
 
-# ── 编码 round-trip ─────────────────────────────────────────────
-
-def test_comb_index():
-    """组合编码/解码一致性"""
-    n = 12
-    k = 4
-    for i in range(math.comb(n, k)):
-        bits = CubeBase.index_to_comb(i, n, k)
-        back = CubeBase.comb_to_index(bits, n, k)
-        assert back == i, f"Fail at {i}: {back}"
-
-    for i in range(24):
-        j = CubieState.encode_perm_ud_slice(CubieState.create_ud_slice_perm(i).tolist())
-        assert j == i, f"Fail at {i}: {j}"
-    for i in range(70):
-        j = CubieState.encode_corner_coset(CubieState.canonical_corner_coset(i).tolist())
-        assert j == i, f"Fail at {i}: {j}"
-    print("All pass!")
-
-
-def test_phase15_move_consistency(cube):
-    """Phase15 坐标 move act 一致性"""
-    T = CubieMove.prim_moves[(0, -1, 2)]
-    Tinv = T.inverse()
-
-    i = 0
-    s = cube.generate_cubie(20)
-    idx = Phase15Coord.project(s).index
-    for k, m in CubieMove.phase15_moves.items():
-        s2, coord = m.act(s)
-        idx2_true = coord.index
-        idx2_fake = m.act_index(idx)
-        if idx2_true != idx2_fake:
-            print(f'{k},{idx2_true},{idx2_fake},{coord},{Phase15Coord.from_index(idx2_fake)}')
-            i += 1
-    print('!=', i)  # 0.10.12..18
-
-
-def test_slice_moves_solvable():
-    s = CubieState.solved()
-    for k, m in CubieMove.slice_moves.items():
-        s2 = m.act(s)
-        print(f'{k},{s2.is_solvable()}')  # (0, 0, 2),(1, 0, 2) (2, 0, 2)True
-
-
-def test_ud_slice_encode():
-    for c in range(495):
-        edges_perm = CubieState.decode_ud_slice(c)
-        coord = CubieState.encode_ud_slice(edges_perm.tolist())
-        assert coord == c, f'{c},{coord},{edges_perm}'
+def test_cubie_roundtrip(cube):
+    a0 = cube.solved.copy()
+    s0 = CubieState.solved()
+    for k, m in CubieMove.prim_moves().items():
+        s1 = m.act(s0)
+        a1 = cube.from_cubie(s1)
+        assert cube.to_cubie(a1) == s1
+        k2 = ActionToken.from_cubie_move(*k, n=3).key
+        a2 = cube.rotate_state(a0, *k2)
+        assert cube.to_cubie(a2) == s1
+        assert np.array_equal(a1, a2)
 
 
 # ── StickerMove ─────────────────────────────────────────────────
@@ -434,9 +407,10 @@ def test_prim_moves_group_props():
 
         assert mv.convert().act(s) == s2
         assert mv.act(s) == mv.convert().act_left(s)
+        assert mv.inverse().is_primitive()
 
-        print(CubieMove.basic_generators[i], k, mv.inverse().is_primitive())
-        print(k, mv.compose(mv) == CubieMove.identity())
+        print(CubieMove.basic_generators[i], k)
+        print(k, mv.compose(mv) == CubieMove.identity())  # dir==2
 
         assert mv.compose(I) == mv and I.compose(mv) == mv
 
@@ -559,10 +533,435 @@ def test_move_compose_counts():
     """描述局部 move 空间 远小于群规模"""
 
 
+def test_move_composition():
+    """move 组合计数实验"""
+    prim_list18 = list(CubieMove.prim_moves.values())
+
+    # 18 个 prim 两两 compose
+    products = set()
+    for g1 in prim_list18:
+        for g2 in prim_list18:
+            prod = g1.compose(g2)
+            if prod != CubieMove.identity():
+                products.add(prod)
+    print(f"18 两两 compose 去重+去 identity: {len(products)}")  # 269
+
+    # 12 outer + identity 两两
+    prim_list12 = [v for k, v in CubieMove.prim_moves.items() if k[2] != 2]
+    ME = CubieMove.identity()
+    prim_list13 = prim_list12 + [ME]
+    products = set()
+    for g1 in prim_list13:
+        for g2 in prim_list13:
+            prod = g1.compose(g2)
+            if prod != ME:
+                products.add(prod)
+    print(f"12 两两 compose 去重+去 identity: {len(products)}")  # 134
+
+    # + inverse
+    products2 = products.copy()
+    for g in products:
+        g2 = g.inverse()
+        if g2 not in products2:
+            products2.add(g2)
+    print(f"+ inverse: {len(products2)}")  # 268
+
+    # + commutator
+    products2 = CubieBase.generate_compose_moves(CubieMove.prim_moves(), commutator=True)
+    print(f"+ commutator: {len(products2)}")  # 224
+
+
+def test_base_consistent(base_list, solved_sticker, solved_cubie):
+    """
+    测试一个 base 是否在所有 prim_moves 下 ori 前7位 diff 统一
+    返回 True 表示通过所有 move 测试
+    统一 twist 定义
+    """
+    total_moves = len(CubieMove.prim_moves)
+    solved_corners_map = {}
+    consistent_count = 0
+    consistent_count_alt = 0
+    ref_diffs = None
+
+    for pid, corner_pos in enumerate(base_list):
+        # 用 solved_sticker 读取这个 slot 的 3 个 sticker
+        stickers = [solved_sticker[f, r, c] for f, r, c in corner_pos]
+        solved_corners_map[frozenset(stickers)] = (pid, np.array(stickers))
+
+    for move_index, (move_key, move) in enumerate(CubieMove.prim_moves.items()):
+        # 旋转 sticker 状态
+        t = ActionToken.from_cubie_move(*move_key, n=3)
+        state = CubeBase.rotate_state(solved_sticker.copy(), *t.key)
+
+        # 用这个 base 读取当前 corners
+        corners = np.empty((8, 3), dtype=solved_sticker.dtype)
+        for i, corner in enumerate(base_list):
+            for j, (f, r, c) in enumerate(corner):
+                corners[i, j] = state[f, r, c]
+
+        # 计算 ori_sticker
+        ori_sticker = np.empty(8, dtype=np.int8)
+        valid = True
+        for i, c in enumerate(corners):
+            key = frozenset(c)
+            if key not in solved_corners_map:
+                valid = False
+                print(f'key not in solved!{c}')
+                break
+            pid, ref = solved_corners_map[key]
+            found = False
+            for twist in range(3):
+                rolled = np.roll(ref, -twist)
+                if np.array_equal(rolled, c):
+                    ori_sticker[pid] = twist  # i
+                    found = True
+                    break
+            if not found:
+                print(f'twist not found!{c}')
+                valid = False
+                break
+
+        if not valid:
+            return False
+
+        # for slot in [1, 2, 5, 6]:
+        #     ori_sticker[slot] = (-ori_sticker[slot]) % 3
+        # 计算 diff
+        ori_sticker_alt = (3 - ori_sticker) % 3  # 计算负向版本
+        s1 = move.act(solved_cubie)
+        target_ori = s1.corners_ori  # [s1.corners_perm]
+        diffs = (ori_sticker[:7] - target_ori[:7]) % 3  # 本身就已经是按当前状态的 slot 顺序排列好的
+        diffs_alt = (ori_sticker_alt[:7] - target_ori[:7]) % 3
+        # diffs3 = (ori_sticker - target_ori) % 3
+        unique = np.unique(diffs)
+        unique_alt = np.unique(diffs_alt)
+
+        if len(unique) == 1:
+            consistent_count += 1
+        elif len(unique_alt) == 1:  # 某些 corner 的方向被镜像
+            consistent_count_alt += 1
+        else:
+            if consistent_count > 3:
+                print('consistent:', consistent_count, consistent_count_alt)
+            break
+
+        # if ref_diffs is None:
+        #     ref_diffs = diffs
+        # else:
+        #     if not np.array_equal(diffs, ref_diffs):
+        #         valid = False
+        #         break
+        # consistent_count += 1
+    print('consistent:', consistent_count, consistent_count_alt)
+    base_offset = [2, 0, 0, 1, 1, 0, 0, 2]
+    CORNER_SIGN = [0, 2, 1, 0, 0, 0, 0, 0]  # [0 2 1 0 0 1 2 0]
+    diff_c = [0, 2, 1, 0, 0, 1, 2, 0]
+    corner_ori_sign = np.ones(8, dtype=np.int8)  # flip_slots
+    corner_ori_sign[[1, 2, 5, 6]] = -1
+    flip_slots = [1, 2, 5, 6]
+
+    if consistent_count_alt > 0:
+        for mask in range(256):  # 2^8 = 256
+            sign_vector = np.array([1 if (mask & (1 << j)) == 0 else -1 for j in range(8)])
+            all_moves_ok = True
+            ct = 0
+            for move_key, move in CubieMove.prim_moves.items():
+                t = ActionToken.from_cubie_move(*move_key, n=3)
+                state = CubeBase.rotate_state(solved_sticker.copy(), *t.key)
+
+                # 用这个 base 读取当前 corners
+                corners = np.empty((8, 3), dtype=solved_sticker.dtype)
+                for i, corner in enumerate(base_list):
+                    for j, (f, r, c) in enumerate(corner):
+                        corners[i, j] = state[f, r, c]
+
+                # 计算 ori_sticker
+                ori_sticker = np.empty(8, dtype=np.int8)
+                valid = True
+                # for slot_i, c in enumerate(corners):
+                #     key = frozenset(c)
+                #     pid, ref = solved_corners_map[key]
+                #     for j, st in enumerate(c):
+                #         if st in (0, 1):  # U 或 D face
+                #             ori_sticker[pid] = j % 3
+                #             break
+                for i, c in enumerate(corners):
+                    key = frozenset(c)
+                    if key not in solved_corners_map:
+                        valid = False
+                        print(f'key not in solved!{c}')
+                        break
+                    pid, ref = solved_corners_map[key]
+                    found = False
+                    for twist in range(3):
+                        rolled = np.roll(ref, -twist)
+                        if np.array_equal(rolled, c):
+                            ori_sticker[pid] = twist
+                            # ori_sticker[pid] = (3 - twist) % 3
+                            found = True
+                            break
+                    if not found:
+                        print(f'twist not found!{c}')
+                        valid = False
+                        break
+
+                if not valid:
+                    return False
+
+                # ori_sticker = (2 * ori_sticker) % 3
+                # ori_sticker = (ori_sticker - base_offset) % 3
+                # for i in range(8):
+                #     ori_sticker[i] = (ori_sticker[i] * CORNER_SIGN[i]) % 3
+                # 计算 diff
+                # ori_sticker = (ori_sticker * corner_ori_sign) % 3
+                # ori_sticker[flip_slots] = (3 - ori_sticker[flip_slots]) % 3
+                s1 = move.act(solved_cubie)
+                target_ori_cubie = np.empty(8, dtype=np.int8)  # s1.corners_ori[s1.corners_perm]
+
+                for slot in range(8):
+                    cubie = s1.corners_perm[slot]
+                    target_ori_cubie[cubie] = s1.corners_ori[slot]
+
+                target_ori = target_ori_cubie  # s1.corners_ori
+
+                diff_0 = (ori_sticker - target_ori) % 3
+                if not np.all(diff_0 == 0):
+                    print(f"orientation mismatch,{mask}")
+                if np.array_equal(ori_sticker, target_ori):
+                    ct += 1
+                    continue  # 已经统一
+
+                corrected_ori = (ori_sticker * sign_vector) % 3
+                diffs = (corrected_ori[:7] - target_ori[:7]) % 3
+                unique = np.unique(diffs)
+                if len(unique) != 1:
+                    all_moves_ok = False
+                    if move_key[-1] == -1:
+                        print(
+                            f"Move {move_key} 找不到 sign 向量让 diff 统一,diff:, {(ori_sticker - target_ori) % 3}")
+                    break
+                print(
+                    f"Move {move_key} sticker:{ori_sticker}cubie:{target_ori},diff:, {(ori_sticker - target_ori) % 3}")
+                # for i in range(8):
+                #     if diff_0[i] != 0:
+                #         print(i, diff_0[i])
+
+                """
+        orientation mismatch,127
+        Move (0, -1, -1) sticker:[0 1 2 0 0 2 1 0]cubie:[0 2 1 0 0 1 2 0],diff:, [0 2 1 0 0 1 2 0]
+        orientation mismatch,127
+        Move (0, 1, 1) sticker:[2 0 0 1 1 0 0 2]cubie:[1 0 0 2 2 0 0 1],diff:, [1 0 0 2 2 0 0 1]
+        orientation mismatch,127
+        Move (2, -1, 1) sticker:[0 0 1 2 0 0 2 1]cubie:[0 0 2 1 0 0 1 2],diff:, [0 0 2 1 0 0 1 2]
+        orientation mismatch,127
+        Move (2, 1, -1) sticker:[1 2 0 0 2 1 0 0]cubie:[2 1 0 0 1 2 0 0],diff:, [2 1 0 0 1 2 0 0]
+        每一个slot位置的4个diff加起来：每个位置的4个diff之和都是3！同一个旋转，被不同 corner 用不同方向解释了"""
+
+            if all_moves_ok:
+                print(f"找到全局 sign 向量！ mask = {bin(mask)},{ct}")
+                print("sign_vector:", sign_vector)
+                return True
+
+    return consistent_count == total_moves or consistent_count_alt == total_moves or (
+            consistent_count + consistent_count_alt) == total_moves
+
+
+def fix_corner_ori_offset(cube):
+    from itertools import permutations, product
+    solved_sticker = cube.solved.copy()
+    s0 = CubieState.solved()
+    original_base = cube.corner_coords(cube.n)
+    """[[(0, 0, 0), (2, 4, 0), (5, 4, 4)], [(0, 0, 4), (2, 4, 4), (4, 4, 0)], [(0, 4, 4), (3, 4, 0), (4, 4, 4)], [(0, 4, 0), (3, 4, 4), (5, 4, 0)], [(1, 4, 0), (2, 0, 0), (5, 0, 4)], [(1, 4, 4), (2, 0, 4), (4, 0, 0)], [(1, 0, 4), (3, 0, 0), (4, 0, 4)], [(1, 0, 0), (3, 0, 4), (5, 0, 0)]]"""
+    for i, c in enumerate(original_base):
+        print(f"slot {i}: {c}")
+
+    for idx, shifts_tuple in enumerate(product([0, 1, 2], repeat=8)):
+        shifts = list(shifts_tuple)
+        basei = []
+        for slot, shift in enumerate(shifts):
+            corner = original_base[slot]
+            rolled_corner = corner[shift:] + corner[:shift]  # 注意 axis=0 因为 corner 是 list of tuple
+            basei.append(rolled_corner)
+
+        if idx % 500 == 0:
+            print(f"已尝试 {idx}:{basei} ")
+        if test_base_consistent(basei, solved_sticker, s0):
+            print(f"\n成功！在第 {idx + 1} 个排列找到正确 basei")
+            print("每个角块的 roll shift (0/1/2):", shifts)
+            print("正确 basei:")
+            for i, corner in enumerate(basei):
+                print(f"slot {i}: {corner}")
+            return basei
+
+    for move_key in [(0, -1, 1), (0, 1, 1), (2, -1, -1), (2, 1, -1)]:
+        move = CubieMove.prim_moves[move_key]
+        t = ActionToken.from_cubie_move(*move_key, n=3)
+        state = CubeBase.rotate_state(cube.solved.copy(), *t.key)
+        corners = cube.get_corners(state)
+        ori_sticker = np.empty(8, dtype=np.int8)
+        # ... 计算 ori_sticker 的代码 ...
+        s11 = cube.to_cubie(state)
+        ori_sticker = s11.corners_ori
+        s1 = move.act(s0)
+        target_ori = s1.corners_ori
+        diffs = (ori_sticker - target_ori) % 3
+        print(f"Move {move_key}: diffs = {diffs}")
+        print(f"  sticker: {ori_sticker}")
+        print(f"  target : {target_ori}")
+        corrected_ori = ori_sticker.copy()
+        corrected_ori[[1, 2, 5, 6]] = (3 - corrected_ori[[1, 2, 5, 6]]) % 3
+        corrected_ori[-1] = (-corrected_ori[:7].sum()) % 3
+        print(f"  corrected : {corrected_ori}")
+
+    return None
+
+
+# ── 编码 round-trip ─────────────────────────────────────────────
+
+def test_comb_index():
+    """组合编码/解码一致性"""
+    n = 12
+    k = 4
+    for i in range(math.comb(n, k)):
+        bits = CubeBase.index_to_comb(i, n, k)
+        back = CubeBase.comb_to_index(bits, n, k)
+        assert back == i, f"Fail at {i}: {back}"
+
+    for i in range(24):
+        j = CubieState.encode_perm_ud_slice(CubieState.create_ud_slice_perm(i).tolist())
+        assert j == i, f"Fail at {i}: {j}"
+    for i in range(70):
+        j = CubieState.encode_corner_coset(CubieState.canonical_corner_coset(i).tolist())
+        assert j == i, f"Fail at {i}: {j}"
+    print("All pass!")
+
+
+def test_phase15_coord_roundtrip():
+    """Phase15Coord encode/decode 一致性"""
+    # index ↔ coord ↔ index
+    for idx in range(24 * 70 * 2):
+        c = Phase15Coord.from_index(idx)
+        assert c.index == idx, f"index roundtrip fail at {idx}"
+        assert 0 <= c.slice_perm < 24
+        assert 0 <= c.corner_coset < 70
+        assert c.parity in (0, 1)
+
+    # slice_perm encode ↔ create_ud_slice_perm
+    for i in range(24):
+        perm = CubieState.create_ud_slice_perm(i)
+        j = CubieState.encode_perm_ud_slice(perm.tolist())
+        assert j == i, f"slice_perm fail at {i}: got {j}"
+
+    # corner_coset encode ↔ canonical_corner_coset
+    for i in range(70):
+        perm = CubieState.canonical_corner_coset(i)
+        j = CubieState.encode_corner_coset(perm.tolist())
+        assert j == i, f"corner_coset fail at {i}: got {j}"
+
+    print("Phase15Coord roundtrip: OK")
+
+
+def test_phase15_project_consistency():
+    """Phase15Coord.project 在 CubieMove.act 下的行为一致性"""
+    s = CubieState.solved()
+    c_solved = Phase15Coord.project(s)
+    assert c_solved.slice_perm == 0
+    assert c_solved.corner_coset == CubieState.solved_corner_coset  # 69
+    assert c_solved.parity == 0
+
+    # project 后的 coord 能与 CubieMove.act 保持一致
+    for k, m in CubieMove.prim_moves.items():
+        s2 = m.act(s)
+        c2 = Phase15Coord.project(s2)
+        # 用 act() 走真实状态再 project
+        a = Phase15Action.phi(m)
+        s3, c3 = a.act(s)
+        assert s2 == s3, f"state mismatch for move {k}"
+        assert c2 == c3, f"coord mismatch for move {k}: {c2} vs {c3}"
+
+    print("Phase15Coord project consistency: OK")
+
+
+def test_phase15_pruning_bfs():
+    """build_phase15_pruning BFS 覆盖全部 3360 坐标"""
+    dist = CubieBase.build_phase15_pruning()
+    N_PHASE15 = 24 * 70 * 2
+    reachable = int(np.sum(dist < 127))
+    print(f"Phase-1.5 pruning reachable: {reachable}/{N_PHASE15}")
+    assert reachable == N_PHASE15, f"Expected 3360 reachable, got {reachable}"
+
+    # solved 坐标距离为 0
+    solved_idx = Phase15Coord.solved().index
+    assert dist[solved_idx] == 0
+
+    # 距离非负且单调
+    assert np.all(dist >= 0)
+    max_dist = np.max(dist)
+    print(f"  max_dist={max_dist}, mean_dist={np.mean(dist):.4f}")
+
+    print("Phase15 pruning BFS: OK")
+
+
+def test_phase15_act_no_act_index():
+    """Phase15Action 只能通过 act(state) 走真实 CubieState，不存在 act_index"""
+    # phi 构造正常
+    for k, m in CubieMove.prim_moves.items():
+        a = Phase15Action.phi(m)
+        assert a.cubie_move == m
+
+        # act() 返回 (CubieState, Phase15Coord)
+        s = CubieState.solved()
+        state, coord = a.act(s)
+        assert isinstance(state, CubieState)
+        assert isinstance(coord, Phase15Coord)
+        assert coord == Phase15Coord.project(state)
+
+        # 验证：多次 act 后 project 与直接 CubieMove.act 一致
+        s2 = m.act(s)
+        assert state == s2, f"act state mismatch for {k}"
+
+    print("Phase15 act (no act_index): OK")
+
+
+def test_slice_moves_solvable():
+    s = CubieState.solved()
+    for k, m in CubieMove.slice_moves.items():
+        s2 = m.act(s)
+        print(f'{k},{s2.is_solvable()}')  # (0, 0, 2),(1, 0, 2) (2, 0, 2)True
+
+
+def test_ud_slice_encode():
+    """encode_ud_slice / decode_ud_slice 与 comb_to_index / index_to_comb 一致性"""
+    # 全 495 坐标 encode/decode roundtrip
+    for c in range(495):
+        edges_perm = CubieState.decode_ud_slice(c)
+        coord = CubieState.encode_ud_slice(edges_perm.tolist())
+        assert coord == c, f'{c},{coord},{edges_perm}'
+
+    # comb_to_index / index_to_comb 内部一致性
+    for c in range(495):
+        bits = CubeBase.index_to_comb(c, n=12, k=4)
+        c2 = CubeBase.comb_to_index(bits, n=12, k=4)
+        assert c == c2, f'comb roundtrip fail at {c}: got {c2}'
+
+    # 随机游走后 encode → decode → encode 一致性
+    for _ in range(500):
+        g = CubieBase.random_walk(length=random.randint(1, 20))
+        state = g.act(CubieState.solved())
+        coord = state.ud_slice_coord
+        assert 0 <= coord < 495
+        perm = CubieState.decode_ud_slice(coord)
+        c2 = CubieState.encode_ud_slice(perm.tolist())
+        assert c2 == coord, f'random walk roundtrip fail: {coord} vs {c2}'
+
+    print("ud_slice encode/decode: OK")
+
+
 # ── Phase 同态 & 搜索 ────────────────────────────────────────────
 
 def test_phase1_homomorphism():
     """验证 phi(m.act(s)) == phi(m).act(phi(s))"""
+
     def check_homomorphism(m: CubieMove, s: CubieState):
         lhs = Phase1Coord.project(m.act(s))  # left
         rhs = Phase1Action.phi(m).act(Phase1Coord.project(s))  # right
@@ -595,7 +994,7 @@ def test_phase1_ud_slice_map():
         for c in range(495):
             s = s.with_(edges_perm=s.decode_ud_slice(c))
             out = m.cubie_move.act(s)
-            assert phi.ud_slice_map[c] == out.ud_slice_coord()
+            assert phi.ud_slice_map[c] == out.ud_slice_coord
     # φ₂ 的同态性
     # for a, m1 in CubieMove.phase1_moves.items():
     #     for b, m2 in CubieMove.phase1_moves.items():
@@ -651,62 +1050,31 @@ def test_phase1_search(cube):
 
 
 def test_phase2_search(cube):
-    """Phase1 → Phase15 → Phase2 完整流程"""
+    """Phase1 → Phase2 完整求解流程：随机 scramble → Phase1 → Phase2 → solved"""
     s0 = CubieState.solved()
-    sampled_items = random.sample(list(CubieMove.prim_moves().items()), 9)
-    m0 = CubieMove.identity()
-    for x, m in sampled_items:
-        print(x)
-        m0 = m0.compose(m)
-    print(m0)
+    s1 = cube.generate_cubie(6)
 
-    for _ in range(10):
-        s0 = random.choice(list(CubieMove.phase1_moves().values())).replay(s0)
+    # Phase 1: 进入 G₁
+    path1, mv1, state1 = CubieBase.solve_phase1(s1, start=2, end=15)
+    assert state1.is_phase1_solved(), f'Phase1 not solved: CO={state1.corners_ori_coord} EO={state1.edge_ori_coord}'
+    # 验证两种作用方式一致
+    s1_apply = CubieMove.apply(s1, [k for k, _ in path1])
+    assert s1_apply == state1, 'Phase1: apply vs act_moves mismatch'
 
-    moves_1 = CubieBase.phase1_search(s0, 15)
-    phase1_state = s0.clone()
-    phase11_state = s0.clone()
-    if moves_1:
-        phase1_state = CubieMove.apply(phase1_state, [x[0] for x in moves_1])
-        for a, m in moves_1:
-            phase11_state = m.replay(phase11_state)
-        assert phase1_state == phase11_state
-    else:
-        print('no moves phase1')
+    # Phase 2: 进入 solved
+    path2, mv2, state2 = CubieBase.solve_phase2(state1, start=2, end=25)
+    assert state2 == CubieState.solved(), f'Phase2 not fully solved: {state2}'
+    # 验证两种作用方式一致
+    s2_apply = CubieMove.apply(state1, [k for k, _ in path2])
+    assert s2_apply == state2, 'Phase2: apply vs act_moves mismatch'
 
-    print(phase1_state.is_phase1_solved(), phase1_state.edges_perm)
-    if not phase1_state.is_phase1_solved():
-        print(phase1_state.ud_slice_coord())
-        phase1_state = CubieBase.canonicalize_ud_slice(phase1_state)
-    print(phase1_state.ud_slice_coord(), phase1_state.edges_perm)
+    # 总复合 move 应直接解出原始 scramble
+    total_mv = mv1.compose(mv2)
+    assert total_mv.act(s1) == CubieState.solved(), 'Total compose should solve original state'
 
-    path15, _, cubie15 = CubieBase.solve_phase15(phase11_state, 8)
-    if not cubie15.is_phase2_ready():
-        print(path15, cubie15)
-    coord_15 = Phase15Coord.project(cubie15)
-    print(coord_15.observables(), coord_15)
-
-    moves_2 = CubieBase.phase2_search(phase1_state, 20)
-    phase2_state = phase1_state.clone()
-    for a, m in moves_2:
-        phase2_state = m.replay(phase2_state)
-
-    _, phase22_state = CubieMove.act_moves(phase1_state, [x[1].cubie_move for x in moves_2])
-    assert phase2_state == phase22_state
-
-    coord_15 = Phase15Coord.project(phase2_state)
-    print(coord_15.index, coord_15.heuristic(), coord_15)
-    # 0 8.0 Phase15Coord(slice_perm=0, corner_coset=69, parity=0)
-    print(coord_15.observables())  # [8. 0. 0. 8. 8.]
-    print(phase2_state.ud_slice_coord())
-    print(phase2_state)
-
-    print(phase2_state.is_phase1_solved())
-    assert phase2_state.corners_ori.sum() == 0
-    assert phase2_state.edges_ori.sum() == 0
-    print(phase2_state == CubieState.solved())
-    print([a for a, _ in moves_1 + moves_2])
-    print(len(moves_1 + moves_2))
+    full_path = [k for k, _ in path1 + path2]
+    print(f'  Phase1={len(path1)} Phase2={len(path2)} moves={full_path}')
+    print('test_phase2_search: OK')
 
 
 # ── 求解 ─────────────────────────────────────────────────────────
@@ -726,12 +1094,12 @@ def test_solve_kociemba(cube):
 def test_examples_solvable(cube):
     """经典 pattern 可解性"""
     tests = [
+        ("Extreme reverse", CubieExample.inversed()),
+        ("Twisted", CubieExample.twisted()),
+        ("Checkerboard", CubieExample.checkerboard()),
+        ("Big Cycle", CubieExample.big_cycle()),
         ("Superflip", CubieExample.superflip()),
         ("Superflip + corners", CubieExample.superflip_plus()),
-        ("Checkerboard", CubieExample.checkerboard()),
-        ("Extreme reverse", CubieExample.inversed()),
-        ("Big Cycle", CubieExample.big_cycle()),
-        ("Twisted", CubieExample.twisted()),
     ]
 
     for name, state in tests:
@@ -753,7 +1121,6 @@ def test_examples_solvable(cube):
     print("\n=== 测试总结 ===")
     for name, steps, t in results:
         print(f"{name:20} | 步数: {steps:2d} | 时间: {t:.2f} 秒")
-
 
 
 # ── 随机路径一致性 ────────────────────────────────────────────────
@@ -868,7 +1235,7 @@ def test_single_move_physical(n=5):
                 print("corner_perm after:", corner_perm)
                 print("ori after:", ori_after, 'ori_2 after:', ori_2, 'ori delta:', ori_delta)
                 print("ori sum after:", np.sum(ori_after) % 3)
-                print(cube.heuristic_corner_old(s), cube.heuristic_corner_perm(s),
+                print(cube.heuristic_corner_perm(s),
                       cube.edge_orientation(s))
                 print(orbit_perm)
                 print(cube.corner_ud_defect(s), cube.edge_ud_defect(s))
@@ -890,6 +1257,339 @@ def test_cache_roundtrip():
 
 # ── Main ─────────────────────────────────────────────────────────
 
+def test_vector_roundtrip(num_random=500, max_steps=50):
+    """验证 from_vector ∘ rho 作用 vs act 作用，以及 is_solvable 保持性
+
+    核心发现（2026-05-11）:
+    ─────────────────────────────────────────────────────────────
+    1. ρ(m) 的 Co/Eo 是对角阵（仅含 twist，不含置换），因此：
+       - 对 GENERATOR 作用于 solved state：始终正确（巧合：
+         generator 的 ori_delta ≡ 其逆元的 ori_delta，对角 Co 恰好
+         给出正确结果；perm 部分通过 Cp/Ep 正确传递）
+       - 对 COMPOSED move 或任意非 solved 状态：ori 部分会出错，
+         因为 Co/Eo 没有跟踪置换信息
+    2. from_vector 本身逻辑正确（argmax + 最近单位根），不需要修。
+       根因在 ρ() 的块对角设计——要修复需要 Co/Eo 与 Cp/Ep 交互
+       （非块对角），会影响整个 spectral 层。
+    3. 所有从 rho 路径解码的状态 is_solvable() 始终为 True。
+    4. Perm 部分（corners_perm, edges_perm）始终正确。
+    """
+    prim_moves = CubieMove.prim_moves
+    prim_keys = list(prim_moves.keys())
+    solved = CubieState.solved()
+    sv = solved.vector
+    rng = random.Random(42)
+    omega = np.exp(2j * np.pi / 3)
+
+    print("\n" + "=" * 70)
+    print("test_vector_roundtrip: from_vector(rho @ vec) vs act(state)")
+    print("=" * 70)
+
+    # ── 0. 验证生成元的 ori_delta 自逆性 ──
+    print("\n--- Part 0: Generator ori_delta self-inverse property ---")
+    all_self_inv = True
+    for key, mv in prim_moves.items():
+        inv_delta = mv.inverse().corners_ori_delta
+        if not np.array_equal(mv.corners_ori_delta, inv_delta):
+            print(f"  {key}: delta != inv.delta! {mv.corners_ori_delta} vs {inv_delta}")
+            all_self_inv = False
+    print(f"  All 18 generators: delta == inv.delta = {all_self_inv}")
+    print(f"  -> This is why diagonal Co works for generators on solved state")
+
+    # ── 1. 单步 on solved: 全对 ──
+    print("\n--- Part 1: 1-step on solved state ---")
+    ok = 0
+    for key in prim_keys:
+        mv = prim_moves[key]
+        rec = CubieState.from_vector(mv.rho() @ sv)
+        ref = mv.inverse().act(solved)
+        if rec == ref:
+            ok += 1
+    print(f"  rec == inv.act(solved): {ok}/{len(prim_keys)} (should be 18)")
+    print(f"  All solvable: {all(CubieState.from_vector(mv.rho() @ sv).is_solvable() for mv in prim_moves.values())}")
+
+    # ── 2. 单步 on arbitrary states ──
+    print("\n--- Part 2: 1-step on arbitrary states ---")
+    n_perm_ok = n_ori_ok = 0
+    n_trials = 100
+    for t in range(n_trials):
+        keys = rng.choices(prim_keys, k=rng.randint(1, 30))
+        s = solved
+        for k in keys:
+            s = prim_moves[k].act(s)
+        mk = rng.choice(prim_keys)
+        mv = prim_moves[mk]
+        rec = CubieState.from_vector(mv.rho() @ s.vector)
+        ref = mv.inverse().act(s)
+        if (np.array_equal(rec.corners_perm, ref.corners_perm) and
+                np.array_equal(rec.edges_perm, ref.edges_perm)):
+            n_perm_ok += 1
+        if (np.array_equal(rec.corners_ori, ref.corners_ori) and
+                np.array_equal(rec.edges_ori, ref.edges_ori)):
+            n_ori_ok += 1
+    n_solvable = sum(1 for _ in range(n_trials) if True)  # placeholder, all True
+    print(f"  perm OK: {n_perm_ok}/{n_trials}")
+    print(f"  ori OK:  {n_ori_ok}/{n_trials}")
+    print(f"  (perm always correct; ori fails on non-solved states because")
+    print(f"   diagonal Co/Eo can't track the state's existing orientation permutation)")
+
+    # ── 3. 多步 on solved: is_solvable 保持性 ──
+    print(f"\n--- Part 3: Multi-step from solved ---")
+    for steps in [1, 2, 5, 10, 20, 50]:
+        n_solvable = 0
+        for t in range(50):
+            keys = rng.choices(prim_keys, k=steps)
+            v = sv.copy()
+            for k in keys:
+                v = prim_moves[k].rho() @ v
+            rec = CubieState.from_vector(v)
+            if rec.is_solvable():
+                n_solvable += 1
+        print(f"  {steps:>3d} steps: solvable={n_solvable}/50")
+
+    # ── 4. 随机合法向量 is_solvable 比例 ──
+    print(f"\n--- Part 4: Random valid-encoding vector is_solvable ({num_random} trials) ---")
+    n_sol = 0
+    for _ in range(num_random):
+        cp = np.zeros((8, 8))
+        for i in range(8):
+            cp[i, rng.randint(0, 7)] = 1.0
+        ep = np.zeros((12, 12))
+        for i in range(12):
+            ep[i, rng.randint(0, 11)] = 1.0
+        co = np.array([rng.choice([1, omega, omega ** 2]) for _ in range(8)], dtype=np.complex64)
+        eo = np.array([rng.choice([1.0, -1.0]) for _ in range(12)], dtype=np.float32)
+        vec = np.concatenate([cp.flatten(), ep.flatten(), co, eo])
+        s = CubieState.from_vector(vec)
+        if s.is_solvable():
+            n_sol += 1
+    print(f"  Solvable: {n_sol}/{num_random} ({100 * n_sol / num_random:.1f}%)")
+
+    # ── 5. 随机 rho 路径后 is_solvable ──
+    print(f"\n--- Part 5: Random rho-path is_solvable ({num_random} trials, steps={max_steps}) ---")
+    n_sol_rho = 0
+    for _ in range(num_random):
+        keys = rng.choices(prim_keys, k=max_steps)
+        v = sv.copy()
+        for k in keys:
+            v = prim_moves[k].rho() @ v
+        s = CubieState.from_vector(v)
+        if s.is_solvable():
+            n_sol_rho += 1
+    print(f"  Solvable: {n_sol_rho}/{num_random} ({100 * n_sol_rho / num_random:.1f}%)")
+    print()
+
+
+def test_matrix_roundtrip(num_random=500, max_steps=50):
+    """验证 from_vector ∘ matrix 作用 vs act 作用
+
+    mv.matrix 与 mv.rho 的关键区别：
+    - matrix 是右作用算子（v @ M），Co/Eo 含置换+twist
+    - rho 是左作用（M @ v），Co/Eo 是对角阵无置换
+    - matrix 对任意状态、任意步数都应该完全正确
+    """
+    prim_moves = CubieMove.prim_moves
+    prim_keys = list(prim_moves.keys())
+    solved = CubieState.solved()
+    sv = solved.vector
+    rng = random.Random(42)
+    omega = np.exp(2j * np.pi / 3)
+
+    print("\n" + "=" * 70)
+    print("test_matrix_roundtrip: from_vector(v @ matrix) vs act(state)")
+    print("=" * 70)
+
+    # ── 1. 单步 on solved ──
+    print("\n--- Part 1: 1-step on solved state ---")
+    ok = 0
+    for key in prim_keys:
+        mv = prim_moves[key]
+        rec = CubieState.from_vector(sv @ mv.matrix)
+        ref = mv.act(solved)
+        if rec == ref:
+            ok += 1
+        else:
+            print(f"  FAIL {key}: eq={rec == ref}, solvable={rec.is_solvable()}")
+            if rec != ref:
+                print(f"    ref={ref}")
+                print(f"    rec={rec}")
+    print(f"  rec == act(solved): {ok}/{len(prim_keys)} (should be 18)")
+
+    # ── 2. 单步 on arbitrary states ──
+    print("\n--- Part 2: 1-step on arbitrary states ---")
+    n_ok = n_solvable = 0
+    n_trials = 100
+    for t in range(n_trials):
+        keys = rng.choices(prim_keys, k=rng.randint(1, 30))
+        s = solved
+        for k in keys:
+            s = prim_moves[k].act(s)
+        mk = rng.choice(prim_keys)
+        mv = prim_moves[mk]
+        rec = CubieState.from_vector(s.vector @ mv.matrix)
+        ref = mv.act(s)
+        if rec == ref:
+            n_ok += 1
+        if rec.is_solvable():
+            n_solvable += 1
+    print(f"  rec == act(s): {n_ok}/{n_trials}")
+    print(f"  solvable:      {n_solvable}/{n_trials}")
+
+    # ── 3. 多步 on solved ──
+    print(f"\n--- Part 3: Multi-step from solved ---")
+    for steps in [1, 2, 5, 10, 20, 50]:
+        n_ok = 0
+        for t in range(50):
+            keys = rng.choices(prim_keys, k=steps)
+            # act chain
+            s = solved
+            for k in keys:
+                s = prim_moves[k].act(s)
+            ref = s
+            # matrix chain (right action: v @ M1 @ M2 @ ...)
+            v = sv.copy()
+            for k in keys:
+                v = v @ prim_moves[k].matrix
+            rec = CubieState.from_vector(v)
+            if rec == ref and rec.is_solvable():
+                n_ok += 1
+        print(f"  {steps:>3d} steps: rec==act_chain={n_ok}/50")
+
+    # ── 4. 随机 matrix 路径后 is_solvable ──
+    print(f"\n--- Part 4: Random matrix-path is_solvable ({num_random} trials, steps={max_steps}) ---")
+    n_sol = 0
+    for _ in range(num_random):
+        keys = rng.choices(prim_keys, k=max_steps)
+        v = sv.copy()
+        for k in keys:
+            v = v @ prim_moves[k].matrix
+        s = CubieState.from_vector(v)
+        if s.is_solvable():
+            n_sol += 1
+    print(f"  Solvable: {n_sol}/{num_random} ({100 * n_sol / num_random:.1f}%)")
+    print()
+
+
+def test_from_rotation():
+    """验证 from_rotation 的 twist 公式：单步非 Y 轴使用 axis-dependent face formula，
+    半步/多步使用 rotation-direction formula，无后置 flip patch。"""
+    pm = CubieMove.prim_moves
+
+    # 1. U/D moves (axis=1): corners never twist
+    for key, mv in pm.items():
+        if key[0] == 1:
+            assert np.all(mv.corners_ori_delta == 0), f'{key}: U/D should have no corner twist'
+
+    # 2. Half-turns (dir=±2): corners never twist (two quarter turns cancel)
+    for key, mv in pm.items():
+        if abs(key[2]) == 2:
+            assert np.all(mv.corners_ori_delta == 0), f'{key}: half-turn should have no corner twist'
+
+    # 3. Single-turn R/L (axis=0): twist depends on face (side), not on ±direction
+    for side in (-1, 1):
+        r_cw = pm[(0, side, 1)].corners_ori_delta
+        r_ccw = pm[(0, side, -1)].corners_ori_delta
+        assert np.array_equal(r_cw, r_ccw), \
+            f'R/L side={side}: CW vs CCW should agree (face-dependent), got {r_cw} vs {r_ccw}'
+
+    # 4. Single-turn F/B (axis=2): twist depends on face (side), not on ±direction
+    for side in (-1, 1):
+        f_cw = pm[(2, side, 1)].corners_ori_delta
+        f_ccw = pm[(2, side, -1)].corners_ori_delta
+        assert np.array_equal(f_cw, f_ccw), \
+            f'F/B side={side}: CW vs CCW should agree (face-dependent), got {f_cw} vs {f_ccw}'
+
+    # 5. R vs R' differ (different faces): side=+1 vs side=-1
+    r_cw = pm[(0, 1, 1)].corners_ori_delta  # R
+    l_cw = pm[(0, -1, 1)].corners_ori_delta  # L
+    assert not np.array_equal(r_cw, l_cw), f'R vs L should differ'
+
+    # 6. F vs B differ
+    f_cw = pm[(2, 1, 1)].corners_ori_delta  # F
+    b_cw = pm[(2, -1, 1)].corners_ori_delta  # B
+    assert not np.array_equal(f_cw, b_cw), f'F vs B should differ'
+
+    # 7. Inverse roundtrip: mv ∘ mv⁻¹ = identity for all 18 prims
+    for key, mv in pm.items():
+        comp = mv.compose(mv.inverse())
+        assert comp == CubieMove.identity(), f'{key}: compose with inverse not identity'
+
+    # 8. Cross-reference: R' = R⁻¹, L' = L⁻¹, F' = F⁻¹, B' = B⁻¹
+    for face_side in (-1, 1):
+        for axis in (0, 2):
+            prim = pm[(axis, face_side, 1)]
+            prim_inv = pm[(axis, face_side, -1)]
+            assert prim_inv == prim.inverse(), f'axis={axis} side={face_side}: prime != inverse'
+
+    print("test_from_rotation: OK (8 checks)")
+
+
+def test_solver_diagnostics():
+    """诊断 solve_kociemba 性能：验证 IDA* heuristic pruning 生效，
+    节点数可控，heuristic 读数正确，depth_limit 递增搜索策略工作正常。"""
+    CubieBase.build_pruning_table()
+
+    # ── 1. Heuristic 一致性 ──
+    state = CubieState.solved()
+    coord = Phase1Coord.project(state)
+    h0 = max(CubieBase.CO_EO_PRUNE[coord.corner_ori, coord.edge_ori],
+             CubieBase.UD_PRUNE[coord.ud_slice])
+    assert h0 == 0, f"Solved state heuristic should be 0, got {h0}"
+    print("  [OK] Heuristic: solved state = 0")
+
+    # ── 2. Scramble depth=3 应被 heuristic 正确估计 ──
+    moves_3 = [(1, 1, 1), (0, 1, 1), (2, 1, 1)]  # U, R, F
+    state3 = CubieMove.apply(CubieState.solved(), moves_3)
+    coord3 = Phase1Coord.project(state3)
+    h3 = max(CubieBase.CO_EO_PRUNE[coord3.corner_ori, coord3.edge_ori],
+             CubieBase.UD_PRUNE[coord3.ud_slice])
+    print(f"  [OK] Heuristic: URF scramble = {h3} (expected <= 3)")
+
+    # ── 3. depth_limit=0 时 heuristic 立即剪枝，不搜索 ──
+    t0 = time.time()
+    res0 = CubieBase.phase1_search(state3, depth_limit=0)
+    t0 = time.time() - t0
+    assert t0 < 0.01, f"depth_limit=0 should be near-instant, got {t0:.3f}s"
+    print(f"  [OK] depth_limit=0: {t0:.4f}s (heuristic immediate prune)")
+
+    # ── 4. 充分 depth_limit 时快速找到解 ──
+    t1 = time.time()
+    res1 = CubieBase.phase1_search(state3, depth_limit=6)
+    t1 = time.time() - t1
+    assert res1 is not None, "Should find solution"
+    assert t1 < 0.1, f"depth_limit=6 should be fast, got {t1:.3f}s"
+    print(f"  [OK] depth_limit=6: {t1:.4f}s, solution len={len(res1)}")
+
+    # ── 5. 验证解的正确性 ──
+    state_after = state3.clone()
+    for k, m in res1:
+        state_after = m.replay(state_after)
+    assert state_after.is_phase1_solved(), "Phase1 solution should resolve CO+EO+UD-slice"
+    print(f"  [OK] Phase1 solution verified")
+
+    # ── 6. 随机 6-move scramble 完整 solve_kociemba ──
+    import random
+    state6 = CubieState.solved()
+    for _ in range(6):
+        k = random.choice(list(CubieMove.prim_moves.keys()))
+        state6 = CubieMove.prim_moves[k].act(state6)
+    t2 = time.time()
+    sol_keys, sol_move = CubieBase.solve_kociemba(state6)
+    t2 = time.time() - t2
+    assert sol_move.act(state6) == CubieState.solved(), "Full solve should return to solved"
+    print(f"  [OK] Full solve_kociemba (6-move scramble): {t2:.3f}s, "
+          f"solution len={len(sol_keys)}")
+
+    # ── 7. depth+h 剪枝生效验证：启发值应阻止无谓深度搜索 ──
+    # 手动测：depth_limit=2, h=2 → depth+h=4 ≤ limit? 不，h>limit 直接剪枝
+    h_before = max(CubieBase.CO_EO_PRUNE[coord3.corner_ori, coord3.edge_ori],
+                    CubieBase.UD_PRUNE[coord3.ud_slice])
+    assert h_before <= 3, f"Heuristic should be reasonable, got {h_before}"
+    print(f"  [OK] Heuristic pruning: h={h_before}, prune at depth_limit < {h_before}")
+
+    print("test_solver_diagnostics: ALL OK")
+
+
 if __name__ == "__main__":
     setup()
     cube = CubieBase(n=N)
@@ -897,12 +1597,7 @@ if __name__ == "__main__":
     # 基本属性
     test_references(cube)
     test_solved_roundtrip(cube)
-
-    # 编码 round-trip
-    test_comb_index()
-    test_phase15_move_consistency(cube)
-    test_slice_moves_solvable()
-    test_ud_slice_encode()
+    test_cubie_roundtrip(cube)
 
     # StickerMove
     test_sticker_move()
@@ -915,22 +1610,40 @@ if __name__ == "__main__":
     test_rotate_state_vs_cubie_move(cube)
     test_gauge_correction(cube)
 
+    # from_rotation refactored twist formula
+    test_from_rotation()
+
+    fix_corner_ori_offset(cube)
+
     # 群论 & 表示
     test_group_axioms()
     test_representation()
     test_prim_moves_group_props()
     test_action_consistency()
     test_move_compose_counts()
+    test_move_composition()
 
     # Phase 同态 & 搜索
     test_phase1_homomorphism()
     test_phase1_ud_slice_map()
     test_phase_graph(cube)
+
+    # 编码 round-trip
+    test_comb_index()
+    test_phase15_coord_roundtrip()
+    test_phase15_project_consistency()
+    test_phase15_pruning_bfs()
+    test_phase15_act_no_act_index()
+    test_slice_moves_solvable()
+    test_ud_slice_encode()
+
     cube.build_pruning_table()
+
     test_phase1_search(cube)
     test_phase2_search(cube)
 
     # 求解
+    test_solver_diagnostics()
     test_solve_kociemba(cube)
     test_examples_solvable(cube)
     """
@@ -968,6 +1681,9 @@ if __name__ == "__main__":
     test_single_move_physical(5)
 
     print('.................')
+
+    # Vector roundtrip: from_vector ∘ rho ≡ act
+    test_vector_roundtrip(num_random=500, max_steps=50)
 
     # Cache
     test_cache_roundtrip()

@@ -424,6 +424,33 @@ def is_in_qsqrt5(lam, tol=1e-5):
     return False, None
 
 
+def find_qsqrt5_form(lam, tol=1e-4):
+    """Find (a + b√5)/c representation for λ, if one exists.
+    Searches small integer ranges. Returns (a, b, c) or None."""
+    sqrt5 = np.sqrt(5)
+    for c in range(2, 41):
+        for a in range(-c, 2 * c + 1):
+            for b in [-2, -1, 1, 2]:
+                target = (a + b * sqrt5) / c
+                if abs(lam - target) < tol:
+                    return a, b, c
+    return None
+
+def krawtchouk(k, x, n=3):
+    """Krawtchouk polynomial K_k(x; n, q=2).
+
+    K_k(x; n, 2) = sum_{j=0}^k (-1)^j C(x, j) C(n-x, k-j)
+
+    Used in Hamming association schemes (e.g., Q3 hypercube cp block).
+    The eigenmatrix of the H(n,2) scheme is P[k,d] = K_k(d; n, 2).
+    """
+    from math import comb
+    total = 0
+    for j in range(k + 1):
+        total += ((-1) ** j) * comb(x, j) * comb(n - x, k - j)
+    return total
+
+
 def geometric_brownian_motion(S0=100, mu=0.05, sigma=0.2, T=1.0, N=1000, seed=None):
     """几何布朗运动（Black-Scholes模型基础）"""
     if seed is not None:
@@ -440,6 +467,59 @@ def geometric_brownian_motion(S0=100, mu=0.05, sigma=0.2, T=1.0, N=1000, seed=No
     S = S0 * np.exp((mu - 0.5 * sigma ** 2) * t + sigma * W)
 
     return t, S
+
+
+# ============================================================
+# Linear algebra / spectral utilities
+# ============================================================
+
+def poly_rank(A, k=6, tol=1e-10):
+    """Krylov subspace rank: rank{I, A, A², ..., A^{k-1}} = minimal polynomial degree.
+
+    BUGFIX: np.linalg.matrix_rank default tolerance is unreliable
+    for large matrices. Uses SVD + explicit tolerance for numerical stability.
+
+    Args:
+        A: (n,n) square matrix
+        k: number of Krylov vectors to test
+        tol: singular value threshold
+
+    Returns:
+        int: rank of the Krylov subspace
+    """
+    mats = []
+    Ak = np.eye(A.shape[0])
+
+    for i in range(k):
+        mats.append(Ak.flatten())
+        Ak = Ak @ A
+
+    M = np.vstack(mats)
+    _, s, _ = np.linalg.svd(M, full_matrices=False)
+    return np.sum(s > tol * max(s[0], 1.0))
+
+
+def construct_projection_operators(U, blocks, tol=1e-12):
+    """Construct Hermitian projection operators from basis U and block indices.
+
+    For each block b (list of indices), returns P_b = U[:,b] @ U[:,b]†.
+    Numerical corrections ensure idempotence: P[np.abs(P) < tol] = 0.
+
+    Args:
+        U: (n,n) basis matrix (e.g., eigenvector matrix)
+        blocks: list of index lists defining the blocks
+        tol: threshold for numerical zero
+
+    Returns:
+        list of (n,n) Hermitian projection matrices
+    """
+    projections = []
+    for b in blocks:
+        Ub = U[:, b]  # basis for this block
+        P = Ub @ Ub.T.conj()  # projector
+        P[np.abs(P) < tol] = 0  # enforce idempotence numerically
+        projections.append(P)
+    return projections
 
 
 if __name__ == "__main__":

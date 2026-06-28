@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from functools import wraps
-import os, joblib
+import os,io,sys,joblib
 
 import time
 from contextlib import contextmanager
@@ -17,6 +17,15 @@ def timer(name):
     yield
     t1 = time.perf_counter()
     print(f"[TIME] {name}: {t1 - t0:.4f}s")
+
+
+def setup_utf8_stdout():
+    if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        except (ValueError, AttributeError):
+            pass  # stdout already configured or not wrappable
+
 
 class IndexProxy(Mapping):
     """
@@ -133,6 +142,15 @@ class class_property:
             return classmethod(wrapper)
 
         return decorator
+    
+    @staticmethod
+    def trigger_properties(cls):
+        """
+        触发类中所有 class_property 的计算，确保它们被缓存。
+        可在需要时调用，或在 save/load 前自动调用。
+        """
+        for prop_name in getattr(cls, '_class_prop_names', []):
+            _ = getattr(cls, prop_name) # triggers __get__ → caches result
 
     @staticmethod
     def save(cls, prop_dir=None):
@@ -144,9 +162,8 @@ class class_property:
             prop_dir = DATA_PROPS_DIR
         os.makedirs(prop_dir, exist_ok=True)
 
-        # 触发所有懒加载计算
-        for prop_name in getattr(cls, '_class_prop_names', []):
-            _ = getattr(cls, prop_name)
+        # 触发所有懒加载计算并缓存结果
+        class_property.trigger_properties(cls) 
 
         for cache_name in getattr(cls, '_class_cache_names', []):
             if not isinstance(cache_name, str):
@@ -192,12 +209,23 @@ class class_cache:
             cache = {}
             setattr(cls, self.cache_name, cache)
 
-        bound = self.func.__get__(obj, cls)  # self.func.__func__/self.func(cls,...
+        # Descriptor protocol: need to handle three cases:
+        #   @staticmethod  — self.func is staticmethod, get via __get__
+        #   @classmethod   — self.func is classmethod, get via __get__ (cls-bound)
+        #   plain method   — self.func is function, call with explicit cls
+        _raw = self.func
+        if isinstance(_raw, (staticmethod, classmethod)):
+            _callee = _raw.__get__(obj, cls)
+        else:
+            _callee = _raw  # call as _callee(cls, *args, **kwargs)
 
         def wrapper(*args, **kwargs):
             key = self.key_func(*args, **kwargs) if self.key_func else (args, tuple(sorted(kwargs.items())))
             if key not in cache:
-                cache[key] = bound(*args, **kwargs)
+                if isinstance(_raw, (staticmethod, classmethod)):
+                    cache[key] = _callee(*args, **kwargs)
+                else:
+                    cache[key] = _callee(cls, *args, **kwargs)
             return cache[key]
 
         wrapper.cache = cache

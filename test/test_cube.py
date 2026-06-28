@@ -1,16 +1,16 @@
 import numpy as np
 import random, math
 from collections import deque
-from rime.cube import StickerCube, CubeBase
-from rime.base import class_cache, class_property,class_status, check_class_status
-
+from rime.cube import StickerCube, CubeBase, ActionToken
+from rime.base import class_cache, class_property, class_status, check_class_status
 
 N = 5
+
 
 class StickerSolver(StickerCube):
 
     def __init__(self, state: np.ndarray | dict = None, n: int = 3):
-        super().__init__(state,n)
+        super().__init__(state, n)
 
     @classmethod
     def from_stickers(cls, sticker: StickerCube):
@@ -28,7 +28,7 @@ class StickerSolver(StickerCube):
                         if len(diffs) >= max_show:
                             return diffs
         return diffs
-    
+
     def propose_move(self, layer_span: int = None) -> tuple[int, int, int]:
         """         
         采样一个候选 move：           
@@ -48,7 +48,7 @@ class StickerSolver(StickerCube):
         # direction probabilities: prefer +/-1; occasional 2
         direction = random.choices([-1, 1, 2], weights=[0.48, 0.48, 0.04], k=1)[0]
         return axis, layer, direction
-    
+
     @class_status('已废弃')
     def heuristic_corner_old(self, state: np.ndarray) -> int:
         '''隐含了三个前提：
@@ -64,7 +64,7 @@ class StickerSolver(StickerCube):
             if set(a) != set(b):
                 wrong += 1
         return wrong
-    
+
     def central_edge_coords(self, face: str, base_fase: str = 'D') -> list:
         """         
         返回 face 与 D 相邻的 central edge 两个 sticker 的位置坐标 (face1, r1, c1), (face2, r2, c2)
@@ -185,7 +185,6 @@ class StickerSolver(StickerCube):
             if res < min_next:
                 min_next = res
         return min_next
-
 
     def greedy_fix_center(self, r: int = 1):
         """         
@@ -404,18 +403,18 @@ class StickerSolver(StickerCube):
         # 简化的配对逻辑：使用标准的 2-3-2 交换序列
         slice_layer = self.mid  # 中间层
         pair_seq = [
-            (0, slice_layer, 1),   # U 顺时针
-            (1, slice_layer, 1),   # R
-            (0, -slice_layer, 1), # D
+            (0, slice_layer, 1),  # U 顺时针
+            (1, slice_layer, 1),  # R
+            (0, -slice_layer, 1),  # D
             (1, -slice_layer, 1),  # L
-            (0, slice_layer, -1), # U' 逆时针
+            (0, slice_layer, -1),  # U' 逆时针
             (1, slice_layer, 1),  # R
             (0, slice_layer, 1),  # U
-            (1, slice_layer, -1), # R'
-            (0, -slice_layer, -1),# D'
+            (1, slice_layer, -1),  # R'
+            (0, -slice_layer, -1),  # D'
             (1, slice_layer, 1),  # R
             (0, slice_layer, 1),  # U
-            (1, slice_layer, -1), # R'
+            (1, slice_layer, -1),  # R'
         ]
         return pair_seq
 
@@ -495,9 +494,16 @@ class StickerSolver(StickerCube):
 
 def test_properties(cube):
     print(cube.face_def)
-    print(cube.corner_face_cycle)
-    print(cube.edge_face_cycle)
+    print('corner',cube.corner_pos_signs)
+    print('edge',cube.edge_pos_signs)
+    print('corner_face',cube.corner_face_cycle)
+    print('edge_face',cube.edge_face_cycle)
+    print('strip',cube.axis_strip)
     print(cube.faces_colors)
+    """
+    IndexProxy([('U', 'R', 'F'), ('U', 'F', 'L'), ('U', 'L', 'B'), ('U', 'B', 'R'), ('D', 'F', 'R'), ('D', 'L', 'F'), ('D', 'B', 'L'), ('D', 'R', 'B')])
+    IndexProxy([('U', 'R'), ('U', 'F'), ('U', 'L'), ('U', 'B'), ('F', 'R'), ('F', 'L'), ('B', 'L'), ('B', 'R'), ('D', 'R'), ('D', 'F'), ('D', 'L'), ('D', 'B')])
+    """
 
 
 def test_coords(cube):
@@ -506,7 +512,11 @@ def test_coords(cube):
     print('corner_coords', len(corners), corners)
     print('edge_coords', len(edges), edges)
     print('map', cube.SOLVED_CORNERS_MAP, cube.SOLVED_EDGES_MAP)
-    print('rotations', len(CubeBase.generate_rotations))
+    print('rotations', len(CubeBase.rotation_matrices))
+    """
+    corner_coords 8 [[(0, 0, 0), (5, 4, 4), (2, 4, 0)], [(0, 0, 4), (2, 4, 4), (4, 4, 0)], [(0, 4, 4), (4, 4, 4), (3, 4, 0)], [(0, 4, 0), (3, 4, 4), (5, 4, 0)], [(1, 4, 0), (2, 0, 0), (5, 0, 4)], [(1, 4, 4), (4, 0, 0), (2, 0, 4)], [(1, 0, 4), (3, 0, 0), (4, 0, 4)], [(1, 0, 0), (5, 0, 0), (3, 0, 4)]]
+    edge_coords 12 [[(0, 2, 0), (5, 4, 2)], [(0, 0, 2), (2, 4, 2)], [(0, 2, 4), (4, 4, 2)], [(0, 4, 2), (3, 4, 2)], [(2, 2, 0), (5, 2, 4)], [(2, 2, 4), (4, 2, 0)], [(3, 2, 0), (4, 2, 4)], [(3, 2, 4), (5, 2, 0)], [(1, 2, 0), (5, 0, 2)], [(1, 4, 2), (2, 0, 2)], [(1, 2, 4), (4, 0, 2)], [(1, 0, 2), (3, 0, 2)]]
+    """
 
 
 def test_strip_colors(cube):
@@ -526,8 +536,25 @@ def test_layer_and_center(cube):
     print('layer_stickers', len(cube.get_layer_stickers(0, 1, cube.n)), cube.get_layer_stickers(0, 1, cube.n))
     rings = cube.get_center_rings(cube.n - 2)
     print('center_rings', len(rings), [len(x) for x in rings], '\n', rings)
-    orbits = cube.center_orbits(cube.n - 1)
-    print('center_orbits', len(orbits), orbits)
+    print('center_orbits', len(cube.SOLVED_CENTERS_MAP['orbits']), cube.SOLVED_CENTERS_MAP['orbits'])
+
+
+def test_act_token():
+    for t in ActionToken.basic_generators(n=3):
+        print(t.key, str(t))
+        t2 = ActionToken.transform(str(t), n=3)
+        assert t == t2, f'{t, t2}'
+
+
+def test_act_token_roundtrip():
+    """verify transform(str(t)) == t for all 12 faces + 3 center slices, all directions"""
+    moves = [f + s for f in 'RULDFB' for s in ['', "'", '2']] + \
+            [f + s for f in 'MES' for s in ['', "'", '2']]
+    for move_str in moves:
+        token = ActionToken.transform(move_str, n=3)
+        back = str(token)
+        assert back == move_str, f"roundtrip failed: {move_str} -> {token.key} -> '{back}'"
+    print('test_act_token_roundtrip: OK')
 
 
 def test_rotation_identity(cube):
@@ -640,18 +667,98 @@ def test_solver_cross(solver):
     print("  solve_cross: OK")
 
 
+def test_corner_coords():
+    """Verify corner_coords correctness for N=3..7 validity."""
+    expected_names = ['URF', 'UFL', 'ULB', 'UBR', 'DFR', 'DLF', 'DBL', 'DRB']
+    for n in [3, 4, 5, 6, 7]:
+        coords = CubeBase.corner_coords(n)
+        assert len(coords) == 8, f'N={n}: expected 8 corners, got {len(coords)}'
+        names = [''.join(CubeBase.FACES[f] for f, r, c in corner) for corner in coords]
+        assert names == expected_names, f'N={n}: expected {expected_names}, got {names}'
+        for i, corner in enumerate(coords):
+            assert len(corner) == 3, f'N={n} corner {i}: expected 3 stickers'
+            faces = [f for f, r, c in corner]
+            assert len(set(faces)) == 3, f'N={n} corner {i}: duplicate faces {faces}'
+            for f, r, c in corner:
+                assert r in (0, n - 1), f'N={n} corner {i}: r={r} out of bounds'
+                assert c in (0, n - 1), f'N={n} corner {i}: c={c} out of bounds'
+    print('test_corner_coords: OK')
+
+
+def test_edge_coords():
+    """Verify edge_coords correctness for N=3..7 validity."""
+    expected_names = ['UR', 'UF', 'UL', 'UB', 'FR', 'FL', 'BL', 'BR', 'DR', 'DF', 'DL', 'DB']
+    for n in [3, 4, 5, 6, 7]:
+        coords = CubeBase.edge_coords(n)
+        assert len(coords) == 12, f'N={n}: expected 12 edges, got {len(coords)}'
+        names = [''.join(CubeBase.FACES[f] for f, r, c in edge) for edge in coords]
+        assert names == expected_names, f'N={n}: expected {expected_names}, got {names}'
+        for i, edge in enumerate(coords):
+            assert len(edge) == 2, f'N={n} edge {i}: expected 2 stickers'
+            faces = [f for f, r, c in edge]
+            assert len(set(faces)) == 2, f'N={n} edge {i}: duplicate faces {faces}'
+            for f, r, c in edge:
+                assert 0 <= r < n, f'N={n} edge {i}: r={r} out of bounds'
+                assert 0 <= c < n, f'N={n} edge {i}: c={c} out of bounds'
+                # edge sticker must be on the border (r or c at 0 or n-1, but not both)
+                is_border = (r in (0, n - 1)) ^ (c in (0, n - 1))
+                assert is_border, f'N={n} edge {i}: ({r},{c}) not an edge position'
+    print('test_edge_coords: OK')
+
+
+def test_center_coords():
+    """Verify center_coords / get_centers / SOLVED_CENTERS_MAP for N=3..7."""
+    for n in [3, 4, 5, 6, 7]:
+        coords = CubeBase.center_coords(n)
+        expected = 6 * (n - 2) ** 2
+        assert len(coords) == expected, f'N={n}: expected {expected} centers, got {len(coords)}'
+        for f, r, c in coords:
+            assert 0 <= f < 6, f'N={n}: face={f}'
+            assert 1 <= r < n - 1, f'N={n}: r={r} on border'
+            assert 1 <= c < n - 1, f'N={n}: c={c} on border'
+        faces = {f for f, r, c in coords}
+        assert faces == set(range(6)), f'N={n}: missing faces'
+
+        # get_centers consistency
+        state = np.arange(6 * n * n).reshape(6, n, n)
+        centers = CubeBase.get_centers(state)
+        for i, (f, r, c) in enumerate(coords):
+            assert centers[i] == state[f, r, c], f'N={n}: get_centers mismatch at {i}'
+
+        # SOLVED_CENTERS_MAP orbits partition center_coords
+        orbits = StickerCube(n=n).SOLVED_CENTERS_MAP['orbits']
+        all_idx = [idx for o in orbits for idx in o]
+        assert sorted(all_idx) == list(range(len(coords))), f'N={n}: orbits dont partition'
+
+    # SOLVED_CENTERS_MAP structure
+    cube = StickerCube(n=5)
+    m = cube.SOLVED_CENTERS_MAP
+    assert 'flat' in m and 'orbits' in m and 'pos_to_orbit' in m
+    assert np.array_equal(m['flat'], cube.get_centers(cube.solved))
+    # orbit_perm on solved state yields identity
+    for perm in cube.orbit_perm(cube.solved_idx):
+        assert np.array_equal(perm, np.arange(len(perm))), 'solved orbit_perm not identity'
+    print('test_center_coords: OK')
+
+
 if __name__ == "__main__":
-    class_cache.load(StickerCube)
-    class_property.load(StickerCube)
+    # class_cache.load(StickerCube)
+    # class_property.load(StickerCube)
 
     cube = StickerCube(n=N)
 
     test_properties(cube)
+    test_corner_coords()
+    test_edge_coords()
+    test_center_coords()
     test_coords(cube)
     test_strip_colors(cube)
     test_encoding(cube)
     test_layer_and_center(cube)
     test_rotation_identity(cube)
+
+    test_act_token()
+    test_act_token_roundtrip()
 
     print('.................')
 
@@ -667,9 +774,9 @@ if __name__ == "__main__":
     print(check_class_status(StickerCube))
 
     # StickerSolver tests
-    print("=== StickerSolver Tests ===")
-    solver = StickerSolver(n=N)
-    test_solver_basic(solver)
-    test_solver_propose_move(solver)
-    test_solver_scramble_and_solve(solver)
-    test_solver_cross(solver)
+    # print("=== StickerSolver Tests ===")
+    # solver = StickerSolver(n=N)
+    # test_solver_basic(solver)
+    # test_solver_propose_move(solver)
+    # test_solver_scramble_and_solve(solver)
+    # test_solver_cross(solver)

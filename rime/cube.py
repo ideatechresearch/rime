@@ -5,71 +5,138 @@ import random, math
 from collections import deque, defaultdict
 
 
-class CubeBase:
-    '''
-    逻辑 → 几何 → 群论 → 可视化,状态系统 World / State Space
-    运算必须封闭
-    表示不能混层
-    不变量是结构给的,不是定义的
-    贴纸世界是表示的一种投影，投影不可逆
-    魔方是一个噪声极低、结构极硬的实验宇宙
-    axis = 0 → x → R/L
-    axis = 1 → y → U/D
-    axis = 2 → z → F/B
-    # AXIS_FACE defines the canonical mapping between Cartesian axes and cube faces.
+class CubeGeometry:
+    """Pure class-level geometric/combinatorial data provider for the Rubik's cube.
 
-    Coordinate system:
-      Right-handed Cartesian system.
+    Everything is derived from:
+      - The face naming convention (_AXIS_FACE_MAP) — the only truly "hardcoded" element
+      - Coordinate rules: corners = exactly 3 non-zero coords in {±1}³,
+        edges = exactly 2 non-zero coords in {±1,0}³
+      - Canonical XZ-plane ordering cycles (clockwise when viewed from +Y)
 
-    AXIS_FACE[axis] = (POS_FACE, NEG_FACE)
-      POS_FACE: face whose outward normal aligns with +axis direction
-                (outer layer: layer == mid / n-1)
-      NEG_FACE: face whose outward normal aligns with -axis direction
-                (outer layer: layer == -mid / 0)
+    All properties use @class_property for lazy caching. No instance state.
+    No hardcoded position lists — every constant is derived from geometry.
+    """
 
-    Rotation direction convention:
-      A positive rotation `d` is defined as clockwise when viewed
-      along the face outward normal (right-hand rule).
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Face naming convention — the only "hardcoded" element
+    # ═══════════════════════════════════════════════════════════════════════════
+    # (axis, side) → face name. side=0 → POS_FACE (+axis normal), side=1 → NEG_FACE (-axis normal)
+    _AXIS_FACE_MAP = {(0, 0): 'R', (0, 1): 'L',
+                      (1, 0): 'U', (1, 1): 'D',
+                      (2, 0): 'F', (2, 1): 'B'}
 
-    NOTE:
-      Face normal directions are fully defined by AXIS_FACE.
-      No additional geometric inference (e.g. dot products) is required.
-    '''
-    # 哪些面在轴的正/负一侧(POS_FACE, NEG_FACE)_SIGN,几何法向,用于坐标推导
-    # 约定：layer == +mid  → POS_FACE (法向 = +axis) 几何意义, 实际可见面 = AXIS_FACE[axis][0]
-    #      layer == -mid  → NEG_FACE (法向 = -axis) 几何意义, 实际可见面 = AXIS_FACE[axis][1]
-    AXIS_FACE = [
+    # Canonical face order (used for indexing throughout)
+    FACES = ['U', 'D', 'F', 'B', 'L', 'R']  # 面标识 上 下 前 后 左 右
+    COLORS = ['W', 'Y', 'R', 'O', 'G', 'B']  # Rubiks 0:白色, 1:黄色, 2:红色, 3:橙色, 4:绿色, 5:蓝色
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Coordinate system constants
+    # ═══════════════════════════════════════════════════════════════════════════
+    AXIS_VEC = np.eye(3, dtype=int)  # axis 0=X, 1=Y, 2=Z → unit vectors
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Canonical XZ-plane ordering cycles (clockwise from +Y)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # For corners (diagonal positions on XZ plane):
+    #   (1,1)→(-1,1)→(-1,-1)→(1,-1) viewed clockwise from +Y
+    _XZ_CYCLE = [(+1, +1), (-1, +1), (-1, -1), (+1, -1)]
+    # For U/D-layer edges (axis-aligned positions on XZ plane):
+    #   X+→Z+→X-→Z- clockwise from +Y
+    _XZ_AXIS_CYCLE = [(+1, 0), (0, +1), (-1, 0), (0, -1)]
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Local "up" direction for each face (conventional, for face_basis)
+    # ═══════════════════════════════════════════════════════════════════════════
+    FACE_UP = {
+        'U': -AXIS_VEC[2],  # -Z: [0, 0, -1]
+        'D': AXIS_VEC[2],  # +Z: [0, 0, 1]
+        'F': AXIS_VEC[1],  # +Y: [0, 1, 0]
+        'B': AXIS_VEC[1],  # +Y: [0, 1, 0]
+        'R': AXIS_VEC[1],  # +Y: [0, 1, 0]
+        'L': AXIS_VEC[1],  # +Y: [0, 1, 0]
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Face → axis/side mappings
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @class_property('AXIS_FACE')
+    def axis_face(cls)->list[tuple]:
+        """AXIS_FACE[axis] = (POS_FACE, NEG_FACE).
+        AXIS_FACE = [
         ('R', 'L'),  # X axis (0), X+ → R, X− → L
         ('U', 'D'),  # Y axis (1), Y+ → U, Y− → D
         ('F', 'B'),  # Z axis (2), Z+ → F, Z− → B
-    ]  # YOLO 正轴方向,物理右手坐标一致, VISIBLE_FACE 人眼观察标准,视角切换:法向 = −axis
-    AXIS_STRIP = (
-        ['U', 'F', 'D', 'B'],  # 'X', 从 +X 看 CCW ,+Y 作为参考
-        ['F', 'R', 'B', 'L'],  # 'Y',+Z 作为参考
-        ['U', 'L', 'D', 'R'],  # 'Z',+X 作为参考 ['R', 'U', 'L', 'D']
-    )  # CCW 视角,从 +axis 方向看过去,4 元环路,trip 顺序,d 是从“面法向外看”时的顺时针旋转次数（右手规则）
-    # AXIS_STRIP = (
-    #     ['U', 'B', 'D', 'F'],  # X
-    #     ['F', 'L', 'B', 'R'],  # Y
-    #     ['U', 'R', 'D', 'L'],  # Z
-    # )
-    # === 依赖 FACES 生成派生结构 ===
-    AXIS_VEC = np.eye(3, dtype=int)
-    FACE_UP = {
-        'U': -AXIS_VEC[2],  # -Z: [0, 0, -1],AXIS_VEC[0]
-        'D': AXIS_VEC[2],  # Z:[0, 0, 1]
+        ]  
+    # YOLO 正轴方向,物理右手坐标一致, 反轴方向,物理右手坐标一致, 轴顺序 X/Y/Z 也符合常规, 但旋转方向约定为面向外法线的顺时针,与右手坐标系的逆时针相反"""
+        return [
+            (cls._AXIS_FACE_MAP[(0, 0)], cls._AXIS_FACE_MAP[(0, 1)]),
+            (cls._AXIS_FACE_MAP[(1, 0)], cls._AXIS_FACE_MAP[(1, 1)]),
+            (cls._AXIS_FACE_MAP[(2, 0)], cls._AXIS_FACE_MAP[(2, 1)]),
+        ]
 
-        'F': AXIS_VEC[1],  # Y:[0, 1, 0]
-        'B': AXIS_VEC[1],
+    @class_property('FACE_AXIS')
+    def face_axis(cls):
+        """face → (axis, side)."""
+        return {face: (axis, side)
+                for axis, pair in enumerate(cls.AXIS_FACE)
+                for side, face in enumerate(pair)}
 
-        'R': AXIS_VEC[1],
-        'L': AXIS_VEC[1],
-    }  # 固定局部坐标系
-    # === 固定顺序 ===
-    FACES = ['U', 'D', 'F', 'B', 'L', 'R']  # 面标识 上 下 前 后 左 右,通常 0=U, 1=D, 2=F, 3=B, 4=L, 5=R
-    COLORS = ['W', 'Y', 'R', 'O', 'G', 'B']  # Rubiks 0:白色, 1:黄色, 2:红色, 3:橙色, 4:绿色, 5:蓝色
-    # (x, y, z) ∈ {±1, ±1, ±1}
-    CORNER_POS_SIGNS = [
+    @class_property('FACE_DEF_IDX')
+    def face_idx(cls)->int:
+        """face → index in FACES."""
+        return {f: i for i, f in enumerate(cls.FACES)}
+
+    @classmethod
+    def face_of(cls, axis:int, side:int)->str:
+        """(axis, side_sign) → face name. side=+1→POS, side=-1→NEG."""
+        return cls.AXIS_FACE[axis][0 if side == 1 else 1]
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Rotation strips — derived from face normals (CCW from +axis)
+    # ═══════════════════════════════════════════════════════════════════════════
+    @class_property('AXIS_STRIP')
+    def axis_strip(cls) -> tuple:
+        """Rotation strips — CCW ordering of faces around each axis, viewed from +axis.
+        Derived: for axis a, sort the 4 perpendicular faces by atan2(n[c], n[b])
+        where b=(a+1)%3, c=(a+2)%3 (right-hand rule CCW). Angles normalized to [0,2π).
+        Uses _AXIS_FACE_MAP + AXIS_VEC directly.
+        AXIS_STRIP = (
+            ['U', 'F', 'D', 'B'],  # X: from +X, CCW, reference +Y
+            ['F', 'R', 'B', 'L'],  # Y: from +Y, CCW, reference +Z
+            ['U', 'L', 'D', 'R'],  # Z: from +Z, CW,  reference +X
+            # ['R', 'U', 'L', 'D']  # same CCW cycle, but from +Z, reference +X ( for better corner orientation handling)
+        )  # CCW 视角,从 +axis 方向看过去,4 元环路,trip 顺序
+    """
+        strips = []
+        for a in range(3):
+            b = (a + 1) % 3
+            c = (a + 2) % 3
+            axis_vec = cls.AXIS_VEC[a]
+            perp = []
+            for axis_idx in range(3):
+                for side in (0, 1):
+                    face = cls._AXIS_FACE_MAP[(axis_idx, side)]
+                    normal = cls.AXIS_VEC[axis_idx].copy() if side == 0 else -cls.AXIS_VEC[axis_idx].copy()
+                    if abs(np.dot(normal, axis_vec)) < 1e-6:
+                        angle = np.arctan2(float(normal[c]), float(normal[b]))
+                        if angle < 0:
+                            angle += 2 * np.pi
+                        perp.append((angle, face))
+            perp.sort()
+            strips.append([name for _, name in perp])
+        return tuple(strips)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Position vectors (derived from coordinate rules + canonical cycles)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @class_property('CORNER_POS_SIGNS')
+    def corner_pos_signs(cls):
+        """8 corners in canonical order: U-layer CW then D-layer CW.
+        Each corner has exactly 3 non-zero coords in {±1}³.
+        CORNER_POS_SIGNS = [
         (+1, +1, +1),  # URF
         (-1, +1, +1),  # UFL
         (-1, +1, -1),  # ULB
@@ -78,8 +145,19 @@ class CubeBase:
         (-1, -1, +1),  # DLF
         (-1, -1, -1),  # DBL
         (+1, -1, -1),  # DRB
-    ]  # 排序逻辑是魔方标准：从U层右前开始，顺时针绕一圈；D层类似（但右手调整）
-    EDGE_POS_SIGNS = [
+    ]  # 排序逻辑是魔方标准：从U层右前开始，顺时针绕一圈；D层类似（但右手调整）"""
+        result = []
+        for sx, sz in cls._XZ_CYCLE:
+            result.append((sx, +1, sz))
+        for sx, sz in cls._XZ_CYCLE:
+            result.append((sx, -1, sz))
+        return result
+
+    @class_property('EDGE_POS_SIGNS')
+    def edge_pos_signs(cls):
+        """12 edges in canonical order: U-layer axis → middle diagonal → D-layer axis.
+        Each edge has exactly 2 non-zero coords in {±1,0}³.
+        EDGE_POS_SIGNS = [
         (+1, +1, 0),  # UR
         (0, +1, +1),  # UF
         (-1, +1, 0),  # UL
@@ -92,20 +170,325 @@ class CubeBase:
         (0, -1, +1),  # DF
         (-1, -1, 0),  # DL
         (0, -1, -1),  # DB
-    ]  # EDGE_COORDS
-    # 对 y 轴的几何分层 quotient，几何派生接口
-    # corner positions
-    U_CORNER_POSITIONS = tuple(i for i, (_, y, _) in enumerate(CORNER_POS_SIGNS) if y == +1)  # (0, 1, 2, 3)
-    D_CORNER_POSITIONS = tuple(i for i, (_, y, _) in enumerate(CORNER_POS_SIGNS) if y == -1)  # (4, 5, 6, 7)
-    # edge positions index（position on cube）
-    SLICE_POSITIONS = tuple(i for i, (_, y, _) in enumerate(EDGE_POS_SIGNS) if y == 0)  # slice {FR, FL, BL, BR},从前向后扫描
-    NON_SLICE_POSITIONS = tuple(i for i, (_, y, _) in enumerate(EDGE_POS_SIGNS) if y != 0)
+        ]  # 排序逻辑：先 U 层四条边（UR UF UL UB），再中层四条边（RF LF LB RB），最后 D 层四条边（DR DF DL DB）"""
+        result = []
+        for sx, sz in cls._XZ_AXIS_CYCLE:
+            result.append((sx, +1, sz))
+        for sx, sz in cls._XZ_CYCLE:
+            result.append((sx, 0, sz))
+        for sx, sz in cls._XZ_AXIS_CYCLE:
+            result.append((sx, -1, sz))
+        return result
 
-    # [0, 1, 2, 3, 8, 9, 10, 11] 非 slice [i for i in range(12) if i not in SLICE_POSITIONS]
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Derived position partitions
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    # # Define corner and edge positions
-    # corner_positions = np.array(CORNER_POS_SIGNS, dtype=int)
-    # edge_positions = np.array(EDGE_POS_SIGNS, dtype=int)
+    @class_property('U_CORNER_POSITIONS')
+    def u_corner_positions(cls):
+        return tuple(i for i, (_, y, _) in enumerate(cls.CORNER_POS_SIGNS) if y == +1)
+
+    @class_property('D_CORNER_POSITIONS')
+    def d_corner_positions(cls):
+        return tuple(i for i, (_, y, _) in enumerate(cls.CORNER_POS_SIGNS) if y == -1)
+
+    @class_property('SLICE_POSITIONS')
+    def slice_positions(cls):
+        return tuple(i for i, (_, y, _) in enumerate(cls.EDGE_POS_SIGNS) if y == 0)
+
+    @class_property('NON_SLICE_POSITIONS')
+    def non_slice_positions(cls):
+        return tuple(i for i, (_, y, _) in enumerate(cls.EDGE_POS_SIGNS) if y != 0)
+
+    @class_property('FB_EDGE_POSITIONS')
+    def fb_edge_positions(cls):
+        return tuple(i for i, (_, _, sz) in enumerate(cls.EDGE_POS_SIGNS) if sz != 0)
+
+    @class_property('NON_FB_EDGE_POSITIONS')
+    def non_fb_edge_positions(cls):
+        return tuple(i for i, (_, _, sz) in enumerate(cls.EDGE_POS_SIGNS) if sz == 0)
+
+    @classmethod
+    def edge_phase_classification(cls):
+        """Return phase-active and phase-trivial edge indices (thin wrapper around class_properties)."""
+        return {"phase_active": list(cls.FB_EDGE_POSITIONS),
+                "phase_trivial": list(cls.NON_FB_EDGE_POSITIONS)}
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Face vector properties
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @class_property('FACE_NORMAL')
+    def face_normal(cls) -> dict[str, np.ndarray]:
+        """face → outward normal vector (length-3 np.array).
+        FACE_NORMAL = {
+        'R': (1, 0, 0),
+        'L': (-1, 0, 0),
+        'U': (0, 1, 0),
+        'D': (0, -1, 0),
+        'F': (0, 0, 1),
+        'B': (0, 0, -1),
+        }  # 由 face naming convention 和 coordinate rules 推导,不是硬编码"""
+        mapping = {}
+        for axis, (pos_face, neg_face) in enumerate(cls.AXIS_FACE):
+            mapping[pos_face] = cls.AXIS_VEC[axis].copy()
+            mapping[neg_face] = -cls.AXIS_VEC[axis].copy()
+        return mapping
+
+    @class_property('FACE_DEF')
+    def face_def(cls) -> dict[str, tuple]:
+        """face → (normal, right, up) basis vectors."""
+        mapping = {}
+        for face, normal in cls.face_normal.items():
+            up = cls.FACE_UP[face].copy()
+            right = np.cross(normal, up)  # 面内基向量（右手系）
+            mapping[face] = (normal, right, up)
+        return mapping
+
+    @classmethod
+    def face_basis(cls, face: str):
+        """Normalised (normal, u_dir, v_dir) basis for a face. u=row, v=col.
+        确定局部行列方向,纯几何面内坐标系
+        约定：
+        - u_dir：面内向上（对应 row）
+        - v_dir：面内向右（对应 col 正方向）
+        - normal：面外法向
+        右手系：normal × u_dir = v_dir"""
+        normal = cls.face_normal[face].astype(float)
+        u_dir = cls.FACE_UP[face].astype(float)
+        u_dir /= np.linalg.norm(u_dir)  # 归一化
+        v_dir = np.cross(normal, u_dir)
+        v_dir /= np.linalg.norm(v_dir)
+        assert np.dot(np.cross(u_dir, v_dir), normal) > 0
+        return normal, u_dir, v_dir
+
+    @class_property('FACE_NORMALS')
+    def FaceNormals(cls) -> np.ndarray:
+        """Face normal vectors as (6, 3) array, indexed by FACES order."""
+        return np.array([cls.face_normal[f] for f in cls.FACES], dtype=float)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Face-cycle properties (corner / edge face names)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @classmethod
+    def get_corner_faces(cls, pos_sign: tuple[int, int, int]) -> tuple[str, str, str]:
+        """The 3 face names meeting at a corner, with U/D first, then clockwise."""
+        sx, sy, sz = pos_sign
+        idx = lambda s: 0 if s > 0 else -1  # 索引：正方向 -> 0, 负方向 -> n-1,每个轴取正方向的面（+1 取正，-1 取反）
+        face_x = cls.AXIS_FACE[0][idx(sx)]  # R/L
+        face_y = cls.AXIS_FACE[1][idx(sy)]  # U/D
+        face_z = cls.AXIS_FACE[2][idx(sz)]  # F/B
+        outward_normal = np.array([0, -sy, 0])
+        cross = np.cross(outward_normal, np.array([sx, 0, 0]))
+        if np.dot(cross, np.array([0, 0, sz])) > 0:
+            return face_y, face_x, face_z
+        return face_y, face_z, face_x
+
+    @classmethod
+    def get_edge_faces(cls, pos_sign: tuple[int, int, int]) -> tuple[str, str]:
+        """The 2 face names meeting at an edge, U/D-first then right-hand rule.
+        对于一个边块的位置符号 (sx, sy, sz)，其中一个坐标为0，另两个为 ±1
+        顺序：先 Y 轴（U/D 优先），然后按右手规则排序剩余两个。
+        """
+        sx, sy, sz = pos_sign
+        assert sx * sy * sz == 0 and sum(1 for s in (sx, sy, sz) if s != 0) == 2
+        idx = lambda s: 0 if s > 0 else -1
+        face_x = cls.AXIS_FACE[0][idx(sx)]
+        face_y = cls.AXIS_FACE[1][idx(sy)]
+        face_z = cls.AXIS_FACE[2][idx(sz)]
+        if sy != 0:
+            return (face_y, face_z) if sz != 0 else (face_y, face_x)
+        return face_z, face_x
+
+    @class_property('CORNER_FACE_CYCLE')
+    def corner_face_cycle(cls):
+        """Corner face-name triples in canonical order.
+        确保 solved 时 U/D 在位置 0,第1位永远是 U 或 D（由 Y 生成角块, 
+        对应：UFR, URB, UBL, ULF, DLF, DFR, DRB, DBL
+         ('U', 'R', 'F'),0: URF
+         ('U', 'F', 'L'),1: UFL
+         ('U', 'L', 'B'),2: ULB
+         ('U', 'B', 'R'),3: UBR
+         ('D', 'F', 'R'),4: DFR
+         ('D', 'L', 'F'),5: DLF
+         ('D', 'B', 'L'),6: DBL
+         ('D', 'R', 'B'),7: DRB
+        """
+        return [cls.get_corner_faces(pos_sign) for pos_sign in cls.CORNER_POS_SIGNS]
+
+    @class_property('EDGE_FACE_CYCLE')
+    def edge_face_cycle(cls):
+        """Edge face-name pairs in canonical order.
+        先 Y 轴（U/D 优先），然后按右手规则排序剩余两个。
+         参考色放第一位（e.g., [U, R], [F, R]）
+         生成角块, 对应：EDGE_INDEX_ORDER = [
+        ('U', 'R'), ('U', 'F'), ('U', 'L'), ('U', 'B'),
+        ('F', 'R'), ('F', 'L'), ('B', 'L'), ('B', 'R'),
+        ('D', 'R'), ('D', 'F'), ('D', 'L'), ('D', 'B'),
+        ]
+        """
+        return [cls.get_edge_faces(pos_sign) for pos_sign in cls.EDGE_POS_SIGNS]
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Incidence and adjacency (pure geometry derived from positions + faces)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @classmethod
+    def corner_on_face(cls, corner_idx: int, face: str) -> bool:
+        """Whether corner i lies on the given face."""
+        sign = cls.CORNER_POS_SIGNS[corner_idx]
+        axis, side = cls.face_axis[face]
+        expected_sign = 1 if side == 0 else -1
+        return sign[axis] == expected_sign
+
+    @classmethod
+    def edge_on_face(cls, edge_idx: int, face: str) -> bool:
+        """Whether edge i lies on the given face."""
+        sign = cls.EDGE_POS_SIGNS[edge_idx]
+        axis, side = cls.face_axis[face]
+        expected_sign = 1 if side == 0 else -1
+        return sign[axis] != 0 and sign[axis] == expected_sign
+
+    @classmethod
+    def faces_of_corner(cls, corner_idx: int) -> list:
+        """The 3 face names meeting at corner i."""
+        return [f for f in cls.FACES if cls.corner_on_face(corner_idx, f)]
+
+    @classmethod
+    def faces_of_edge(cls, edge_idx: int) -> list:
+        """The 2 face names meeting at edge i."""
+        return [f for f in cls.FACES if cls.edge_on_face(edge_idx, f)]
+
+    @classmethod
+    def corners_affected_by_face(cls, face: str) -> list:
+        """Corner indices lying on a given face (always 4)."""
+        return [c for c in range(8) if cls.corner_on_face(c, face)]
+
+    @classmethod
+    def edges_affected_by_face(cls, face: str) -> list:
+        """Edge indices lying on a given face (always 4)."""
+        return [e for e in range(12) if cls.edge_on_face(e, face)]
+
+    @classmethod
+    def corner_orientation_axes(cls, corner_idx: int):
+        """The 3 face normals at a corner (for orientation computation).
+
+        Used to determine how a face turn affects corner orientation.
+        The orientation of a corner cubie is defined relative to which
+        face sticker is on which face of the cube."""
+        faces = cls.faces_of_corner(corner_idx)
+        normals = [cls.face_normal[f].copy() for f in faces]
+        return faces, normals
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Incidence matrices (Bose-Mesner / association scheme data)
+    # ══
+    @class_property('CORNER_ADJACENCY')
+    def build_corner_adjacency(cls):
+        """Hamming-distance adjacency for 8 corners (Q₃ hypercube).
+        On the 3-cube, corners differ in 1, 2, or 3 coordinate signs.
+        This is the adjacency metric of the Q3 hypercube.
+        Returns {'A': [A₀..A₃], 'v': [1,3,3,1]} — Bose-Mesner basis for the cp block.
+        """
+        verts = np.array(cls.CORNER_POS_SIGNS, dtype=int)
+        A = []
+        for d in range(4):
+            Ad = np.zeros((8, 8), dtype=int)
+            for i in range(8):
+                for j in range(8):
+                    if int(np.sum(verts[i] != verts[j])) == d:
+                        Ad[i, j] = 1
+            A.append(Ad)
+        return {"A": A, "v": np.array([1, 3, 3, 1], dtype=int)}
+
+    @class_property('EDGE_FACE_INCIDENCE')
+    def build_edge_face_incidence(cls):
+        """12×6 edge-face incidence matrix J.
+
+        J[e,f] = 1 iff edge e lies on face f (each row=2 ones, each col=4 ones).
+        Returns:
+            J: (12, 6) int matrix
+            edge_labels: list of 12 edge name strings
+            face_labels: list of 6 face name strings (= FACES)
+        """
+        n_edges = len(cls.EDGE_POS_SIGNS)
+        n_faces = len(cls.FACES)
+        J = np.zeros((n_edges, n_faces), dtype=int)
+        for e in range(n_edges):
+            for f_idx, f in enumerate(cls.FACES):
+                if cls.edge_on_face(e, f):
+                    J[e, f_idx] = 1
+        edge_labels = ['-'.join(cls.faces_of_edge(e)) for e in range(n_edges)]
+        return {"J": J, "edge_labels": edge_labels, "face_labels": list(cls.FACES)}
+
+    @class_property('CORNER_FACE_INCIDENCE')
+    def build_corner_face_incidence(cls):
+        """8×6 corner-face incidence matrix C.
+
+        C[c,f] = 1 iff corner c lies on face f (each row=3 ones, each col=4 ones).
+        Returns:
+            C: (8, 6) int matrix
+            corner_labels: list of 8 corner name strings
+            face_labels: list of 6 face name strings (= FACES)
+        """
+        n_corners = len(cls.CORNER_POS_SIGNS)
+        n_faces = len(cls.FACES)
+        C = np.zeros((n_corners, n_faces), dtype=int)
+        for c in range(n_corners):
+            for f_idx, f in enumerate(cls.FACES):
+                if cls.corner_on_face(c, f):
+                    C[c, f_idx] = 1
+        corner_labels = ['-'.join(cls.faces_of_corner(c)) for c in range(n_corners)]
+        return {"C": C, "corner_labels": corner_labels, "face_labels": list(cls.FACES)}
+
+    @class_property('FACE_ADJACENCY')
+    def build_face_adjacency(cls):
+        """6×6 face adjacency matrix. Adjacent = share an edge (not opposite).
+        Two faces are adjacent if they share an edge.
+        Opposite faces (U/D, F/B, R/L) do NOT share an edge.
+
+        Returns:
+            adj: (6, 6) bool matrix, adj[i,j] = True if faces i and j share an edge"""
+        n_faces = len(cls.FACES)
+        adj = np.zeros((n_faces, n_faces), dtype=bool)
+        for e in range(len(cls.EDGE_POS_SIGNS)):
+            fs = [cls.FACES.index(f) for f in cls.faces_of_edge(e)]
+            adj[fs[0], fs[1]] = True
+            adj[fs[1], fs[0]] = True
+        return adj
+
+
+# ── Trigger all CubeGeometry @class_property computation ──
+# Existing code references cached names (CORNER_POS_SIGNS, EDGE_POS_SIGNS, etc.)
+# directly; the descriptor only caches after first access.  Force computation now.
+def _trigger_geometry_properties():
+    class_property.trigger_properties(CubeGeometry)
+
+
+_trigger_geometry_properties()
+
+
+class CubeBase(CubeGeometry):
+    '''
+    逻辑 → 几何 → 群论 → 可视化,状态系统 World / State Space
+    运算必须封闭
+    表示不能混层
+    不变量是结构给的,不是定义的
+    贴纸世界是表示的一种投影，投影不可逆
+    魔方是一个噪声极低、结构极硬的实验宇宙
+
+    Inherits all geometric constants from CubeGeometry:
+      AXIS_FACE, CORNER_POS_SIGNS, EDGE_POS_SIGNS, FACES, etc.
+      — derived from face naming convention + coordinate rules, not hardcoded.
+
+    Coordinate system:
+      Right-handed Cartesian system.
+
+    Rotation direction convention:
+      A positive rotation `d` is defined as clockwise when viewed
+      along the face outward normal (right-hand rule).
+    '''
 
     def __init__(self, n: int = 3):
         """纯几何 / move 定义（无状态）"""
@@ -114,6 +497,7 @@ class CubeBase:
         self.solved = self.solved(n)
         self.SOLVED_CORNERS_MAP = self.solved_corners_map()
         self.SOLVED_EDGES_MAP = self.solved_edges_map()
+        self.SOLVED_CENTERS_MAP = self.solved_centers_map()
 
     @property
     def mid(self) -> int:
@@ -180,44 +564,70 @@ class CubeBase:
 
     @staticmethod
     def get_data(state: np.ndarray, coords_def: list | tuple) -> tuple:
-        '''把 piece 看成一个“颜色集合”，忽略朝向，只关心它是哪个 piece'''
+        '''把 piece 看成一个"颜色集合"，忽略朝向，只关心它是哪个 piece'''
         return tuple(sorted(state[f, r, c].tolist() for f, r, c in coords_def))
 
-    def get_corners(self, state: np.ndarray) -> np.ndarray:
+    @classmethod
+    def get_colors(cls, state: np.ndarray) -> dict:
+        """返回原来使用的 face->二维字符串颜色矩阵"""
+        n = state.shape[1]
+        face_stickers = cls.get_face_stickers(n=n)  # 返回 [(r, c, pos), ...] 按渲染顺序
+        idx_color = {i: c for i, c in enumerate(cls.COLORS)}
+        result = {}
+        for fidx, face in enumerate(cls.FACES):
+            # col_mat = np.vectorize(idx_color.get)(state[fidx, :, :])
+            # result[face] = col_mat.tolist()  # 转为普通列表[[str,str]]
+            mat = np.empty((n, n), dtype='<U1')
+            coords = face_stickers[face]
+            for (r, c, _), color_idx in zip(coords, state[fidx].flatten()):
+                mat[r, c] = idx_color[color_idx]
+            result[face] = mat.tolist()
+
+        return result
+
+    @classmethod
+    def from_color(cls, cube_color: dict) -> np.ndarray:
+        # 传入的 state 是面->二维列表的映射
+        color_index = {color: i for i, color in enumerate(cls.COLORS)}
+        n = len(cube_color)
+        arr = np.zeros((6, n, n), dtype=np.uint8)
+        for fidx, face in enumerate(cls.FACES):
+            face_mat = cube_color[face]
+            arr[fidx, :, :] = np.vectorize(color_index.get)(face_mat)
+        return arr
+
+    @classmethod
+    def get_corners(cls, state: np.ndarray) -> np.ndarray:
         """
         返回 8 个角块的三颜色编号（按顺序）shape = (8, 3),
         角块位置： (face, row, col) 三元组的 3 个集合
         """
         res = np.empty((8, 3), dtype=state.dtype)
-        for i, corner in enumerate(self.corner_coords(self.n)):
+        for i, corner in enumerate(cls.corner_coords(n=state.shape[1])):
             # corner 是 [(face,row,col), ...]
             for j, (f, r, c) in enumerate(corner):
                 res[i, j] = state[f, r, c]
         return res
 
-    def get_edges(self, state: np.ndarray) -> np.ndarray:
+    @classmethod
+    def get_edges(cls, state: np.ndarray) -> np.ndarray:
         """返回 12 个角块的2颜色编号（按顺序）shape = (12,2)"""
         res = np.empty((12, 2), dtype=state.dtype)
-        for i, edge in enumerate(self.edge_coords(self.n)):
+        for i, edge in enumerate(cls.edge_coords(n=state.shape[1])):
             for j, (f, r, c) in enumerate(edge):
                 res[i, j] = state[f, r, c]
         return res
 
-    # def get_centers(self, state: np.ndarray) -> np.ndarray:
-    #     """
-    #     从 sticker-level 状态生成 orbit_perm
-    #     state: np.ndarray, shape = (6, n, n), 每个元素是颜色或编号
-    #     """
-    #     flat = []  # flatten 所有中心贴纸，顺序严格对应 center_orbits
-    #     for fidx, rings in enumerate(self.get_center_rings(self.n)):
-    #         for ring in rings:
-    #             for r, c, _ in ring:
-    #                 flat.append(state[fidx, r, c])
-    #     return np.array(flat, dtype=state.dtype)
+    @classmethod
+    def get_centers(cls, state: np.ndarray) -> np.ndarray:
+        """Extract center sticker colors from state in canonical order."""
+        coords = cls.center_coords(state.shape[1])
+        return np.array([state[f, r, c] for f, r, c in coords], dtype=state.dtype)
 
-    def encode_state(self, state: np.ndarray) -> np.ndarray:
+    @classmethod
+    def encode_state(cls, state: np.ndarray) -> np.ndarray:
         """48: 8*3+12*2,物理块不去重"""
-        return np.concatenate([self.get_corners(state).ravel(), self.get_edges(state).ravel()]).astype(np.uint8)
+        return np.concatenate([cls.get_corners(state).ravel(), cls.get_edges(state).ravel()]).astype(np.uint8)
 
     def solved_corners_map(self) -> dict:
         """
@@ -269,6 +679,29 @@ class CubeBase:
             edge_map[(b, a)] = (pid, 1)  # flipped 翻转映射：同一个块,ori[i] = 1
         return edge_map
 
+    def solved_centers_map(self) -> dict:
+        """Center identity map: orbit structure + solved-state colors.
+
+        Returns dict:
+          flat: np.ndarray — get_centers(self.solved), colors in center_coords order
+          orbits: list[list[int]] — flat index groups per orbit (center_coords order)
+          pos_to_orbit: list[tuple] — per flat index: (orbit_id, pos_in_orbit)
+        """
+        coords = self.center_coords(self.n)
+        idx_map = {c: i for i, c in enumerate(coords)}
+        rings = CubeBase.get_center_rings(self.n)
+        orbits = []
+        for fidx, face_rings in enumerate(rings):
+            for ring in face_rings:
+                orbits.append([idx_map[(fidx, r, c)] for r, c, _ in ring])
+
+        centers = self.get_centers(self.solved)
+        pos_to_orbit = [None] * len(centers)
+        for oid, indices in enumerate(orbits):
+            for pos, idx in enumerate(indices):
+                pos_to_orbit[idx] = (oid, pos)
+        return {'flat': centers, 'orbits': orbits, 'pos_to_orbit': pos_to_orbit}
+
     def edge_ids_ori(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """ edges_perm  (12) 保留方向,按标准顺序"""
         edges = self.get_edges(state)  # current_edges
@@ -282,30 +715,20 @@ class CubeBase:
         return perm, ori
 
     def orbit_perm(self, state: np.ndarray) -> list[np.ndarray]:
-        """
-           从 sticker-level 状态生成 orbit_perm
-           state: np.ndarray, shape = (6, n, n), 每个元素是颜色或编号
-        """
-        centers = CubeBase.get_center_rings(self.n)
-        flat = []  # flatten 所有中心贴纸，顺序严格对应 center_orbits
-        for fidx, rings in enumerate(centers):
-            for ring in rings:
-                for r, c, _ in ring:
-                    flat.append(state[fidx, r, c])
+        """每个 orbit 内 center 贴纸的相对排列 (使用 SOLVED_CENTERS_MAP 中的 orbit 结构)."""
+        m = self.SOLVED_CENTERS_MAP
+        current = self.get_centers(state).astype(np.int32)
 
-        center_colors = np.array(flat, dtype=np.int32)
-
-        orbits: list[list[int]] = CubeBase.center_orbits(self.n)
-        orbits = [o for o in orbits if len(o) > 1]
-        orbit_perm: list[np.ndarray] = []  # 每个 array 长度 = len(orbit)
-        for orbit_idx in orbits:
-            pieces = center_colors[orbit_idx]  # 映射到 0..k-1（orbit 内相对编号）
+        result: list[np.ndarray] = []
+        for oid, indices in enumerate(m['orbits']):
+            if len(indices) <= 1:
+                continue
+            pieces = current[indices]
             order = np.argsort(pieces)
             rel = np.empty_like(order)
             rel[order] = np.arange(len(order))
-            orbit_perm.append(rel)
-
-        return orbit_perm
+            result.append(rel)
+        return result
 
     def basic_generators(self) -> list:
         """基础生成元,逻辑层（axis, layer, direction）与几何层解耦，返回 move list,有限邻域 moves（减枝！！）"""
@@ -506,49 +929,12 @@ class CubeBase:
         return [name for name, value in vars(cls).items() if
                 not (callable(value) or isinstance(value, (classmethod, staticmethod)))]
 
-    @class_property('FACE_NORMAL')
-    def face_normal(cls) -> dict[str, np.ndarray]:
-        '''FACE_NORMAL = {
-        'R': (1, 0, 0),
-        'L': (-1, 0, 0),
-        'U': (0, 1, 0),
-        'D': (0, -1, 0),
-        'F': (0, 0, 1),
-        'B': (0, 0, -1),
-        }'''
-        mapping = {}
-        for axis, (pos_face, neg_face) in enumerate(cls.AXIS_FACE):
-            mapping[pos_face] = cls.AXIS_VEC[axis]
-            mapping[neg_face] = -cls.AXIS_VEC[axis]
-        return mapping
-
-    @class_property('FACE_DEF')
-    def face_def(cls) -> dict[str, tuple]:
-        mapping = {}  # 六个面的法向和基向 dx, dy
-        for face, normal in cls.face_normal.items():  # face 法向量
-            up = cls.FACE_UP[face]
-            right = np.cross(normal, up)  # 面内基向量（右手系）,right2 = world_up × forward = -right
-            mapping[face] = (normal, right, up)
-
-        return mapping
-
-    @class_property('FACE_AXIS')
-    def face_axis(cls) -> dict[str, tuple]:
-        # 哪个面属于哪个轴
-        return {face: (axis, side)
-                for axis, pair in enumerate(cls.AXIS_FACE)
-                for side, face in enumerate(pair)}
-
-    @class_property('FACE_DEF_IDX')
-    def face_idx(cls) -> dict:
-        return {f: i for i, f in enumerate(cls.FACES)}
-
     @staticmethod
     def center_layers_list(n: int) -> list:
         mid, c = divmod(n, 2)
         if c == 1:
             return list(range(-mid, mid + 1))  # 奇数阶：中心在 0
-        return [i for i in range(-mid, mid + 1) if i != 0]  # 偶数阶：无中心层
+        return [i for i in range(-mid, mid + 1) if i != 0]
 
     @staticmethod
     def layer_index(layer: int, n: int) -> int:
@@ -561,22 +947,21 @@ class CubeBase:
 
     @staticmethod
     def layer_to_logic(layer: int, n: int) -> float:
-        """ 逻辑 / 拓扑坐标空间,逻辑世界坐标,半连续,abstract ℤ / ℤ +½ """
+        """逻辑/拓扑坐标空间"""
         c = n % 2
-        if c == 1:  # 奇数阶：整数 → 整数
+        if c == 1:
             return float(layer)
-        # 偶数阶：整数 layer → 半整数坐标
-        return layer - 0.5 if layer > 0 else layer + 0.5
+        return layer - 0.5 if layer > 0 else layer + 0.5  # 偶数阶：整数 layer → 半整数坐标
 
     @staticmethod
     def layer_to_geom(layer: int, n: int) -> float:
-        """几何模型空间,ℝ³ model space 动画"""
+        """几何模型空间"""
         return -n / 2 + 0.5 + layer
 
     @classmethod
     def face_rc_to_xyz(cls, face: str, r: int, c: int, n: int):
         """
-        把 某个面上的 row/col 映射到世界坐标系 XYZ 返回 [x,y,z]
+        把某个面上的 row/col 映射到世界坐标系 XYZ 返回 [x,y,z]
         把离散拓扑嵌入到连续空间中保持方向一致性
         face 上的 row / col 方向（固定定义）
         约定：
@@ -596,27 +981,6 @@ class CubeBase:
         if n % 2 == 1:  # 离散化,保证严格整数
             return np.round(pos).astype(int)
         return np.sign(pos) * np.floor(np.abs(pos) + 0.5).astype(int)  # 原点缺失,parity 成为全局约束
-
-    @classmethod
-    def face_basis(cls, face: str):
-        """
-        带法向的面内正交基,面自身的几何事实
-        确定局部行列方向,纯几何面内坐标系
-        约定：
-        - u_dir：面内向上（对应 row）
-        - v_dir：面内向右（对应 col 正方向）
-        - normal：面外法向
-        """
-        normal = cls.face_normal[face].astype(float)
-
-        u_dir = cls.FACE_UP[face].astype(float)
-        u_dir /= np.linalg.norm(u_dir)  # 归一化
-
-        v_dir = np.cross(normal, u_dir)
-        v_dir /= np.linalg.norm(v_dir)
-
-        assert np.dot(np.cross(u_dir, v_dir), normal) > 0
-        return normal, u_dir, v_dir
 
     @staticmethod
     def sticker_pos(normal, u_dir, v_dir, r: int, c: int, n: int) -> np.ndarray:
@@ -700,8 +1064,8 @@ class CubeBase:
         """
           返回某 axis, face, layer 对应的条带坐标列表，已按中心原点计算
           返回: [(face, r, c), ...]  按 strip 顺序排列
-          layer 在“世界坐标系”里定义
-          row / col 在“face 局部坐标系”里定义
+          layer 在"世界坐标系"里定义
+          row / col 在"face 局部坐标系"里定义
           strip 级别旋转 ≠ piece 级别置换
           几何排序 ≠ 拓扑顺序
         """
@@ -716,8 +1080,6 @@ class CubeBase:
             normal, u_dir, v_dir = cls.face_basis(face)
             # if np.dot(normal, axis_vec) < 0:  # 负侧面
             #     v_dir = -v_dir  # 只翻转向右方向,让所有 face 的 strip 方向在旋转轴视角下保持一致
-            #     print('axis', axis, 'face', face, '负侧面统一翻转!')
-            # u_dir = -u_dir
             strip_dir = np.cross(axis_vec, normal)
             strip_dir /= np.linalg.norm(strip_dir)  # 该面对应的旋转条带方向或法向量
             # 确定沿哪个方向 (v 或 u)，并计算 align
@@ -729,7 +1091,6 @@ class CubeBase:
             else:
                 key_dir = v_dir  # key = lambda x: x[1]  # c
                 reverse = align_v < 0
-            # print('axis', axis, 'face', face, 'u', align_u, 'v', align_v, reverse)
             # coords_sorted = sorted(coords, key=lambda x: np.dot(x[2], strip_dir))
             coords_sorted = sorted(coords, key=lambda x: np.dot(x[2], key_dir), reverse=reverse)  # 世界坐标投影排序
             strip = [(fidx, r, c) for r, c, _ in coords_sorted]
@@ -743,13 +1104,13 @@ class CubeBase:
         face_normal = cls.face_normal()
         axis_vec = cls.AXIS_VEC[axis]
         strips = []
-        # prev_strip_dir = None  # 用于检查连续性
-        # prev_v_dir=None
-        for idx, face in enumerate(cls.AXIS_STRIP[axis]):
-            fidx = cls.face_idx[face]  # self.FACES.index(face)
+        for face in cls.AXIS_STRIP[axis]:
+            fidx = cls.face_idx[face]
             normal = face_normal[face]
-            # 相邻面之间“向右”和“向上”的递进方向不连续,选择一致的参考系
-            reverse = (axis == 2 and idx % 2 == 1)  # 第1、3个面（R 和 L 对于 Z 轴）,每隔一个面（奇数位）需要翻转 u_dir，使“向右”方向在环路上连续
+            _, u_dir, v_dir = cls.face_basis(face)
+            # geometric: swap (r,c) when strip direction aligns more with v_dir than u_dir
+            strip_dir = np.cross(axis_vec, normal)
+            reverse = abs(np.dot(strip_dir, v_dir)) > abs(np.dot(strip_dir, u_dir))
             # 收集该 face 上属于 layer 的所有贴纸
             coords = []
             for r in range(n):
@@ -791,7 +1152,7 @@ class CubeBase:
             #
             # # 更新 prev for next
             # prev_strip_dir = strip_dir
-            # prev_v_dir = v_dir  # 或 u_dir, 取决于环是否沿col 方向绕,由于约定 v_dir=向右 (col), 用 v_dir 作为“前进”代理
+            # prev_v_dir = v_dir  # 或 u_dir, 取决于环是否沿col 方向绕,由于约定 v_dir=向右 (col), 用 v_dir 作为"前进"代理
             # dir_idx = np.argmax(np.abs(strip_dir))
             inc_dir = coords[-1][2] - coords[0][2]  # last - first
             if np.dot(inc_dir, strip_dir) < 0:  # 世界坐标方向向量，用整个条带判断是否需要反转
@@ -847,92 +1208,11 @@ class CubeBase:
     def rotate_state(cls, state: np.ndarray, axis: int, layer: int, direction: int) -> np.ndarray:
         """
         纯函数版本：不修改传入 state，返回新状态 next_state 副本（已经应用旋转）。rotate_state 只存在于贴纸层
-        用于 BFS/IDA*/并行扩展时的安全调用。区别实例方法“就地旋转”，完全独立
+        用于 BFS/IDA*/并行扩展时的安全调用。区别实例方法"就地旋转"，完全独立
         """
         arr = state.copy()
         cls.rotate_core(arr, axis, layer, direction)
         return arr  # new_state
-
-    @classmethod
-    def get_corner_faces(cls, pos_sign: tuple[int, int, int]) -> tuple[str, str, str]:
-        '''
-        dict(enumerate(cls.AXIS_FACE)) 轴到面映射: {0: ('R','L'), 1: ('U','D'), 2: ('F','B')}
-        标准顺序，确保 solved 时 U/D 在位置 0,第1位永远是 U 或 D（由 Y)
-        U面：从 +Y 看（向上），D面：从 -Y 看（从下方向上看）
-        先Y (U/D)，然后X Z (右手: 对于U, Z→X顺时针)
-        '''
-        sx, sy, sz = pos_sign  # (sx, sy, sz) ∈ {±1, ±1, ±1}
-        # 索引：正方向 -> 0, 负方向 -> n-1,每个轴取正方向的面（+1 取正，-1 取反）
-        idx = lambda s: 0 if s > 0 else - 1
-        face_x = cls.AXIS_FACE[0][idx(sx)]  # R/L
-        face_y = cls.AXIS_FACE[1][idx(sy)]  # U/D
-        face_z = cls.AXIS_FACE[2][idx(sz)]  # F/B
-        # 三个方向向量（单位向量）
-        vec_x = np.array([sx, 0, 0])
-        vec_z = np.array([0, 0, sz])
-        outward_normal = np.array([0, -sy, 0])  # -vec_y
-        # 计算叉乘：outward_normal × vec_x 应该指向 vec_z 的方向（右手规则）
-        cross = np.cross(outward_normal, vec_x)
-        if np.dot(cross, vec_z) > 0:  # 顺序正确：vec_x  →  vec_z 是顺时针
-            return face_y, face_x, face_z  # 102
-        return face_y, face_z, face_x  # 120
-
-    @class_property('CORNER_FACE_CYCLE')
-    def corner_face_cycle(cls) -> list[tuple]:
-        '''
-         标准顺序，确保 solved 时 U/D 在位置 0,第1位永远是 U 或 D（由 Y
-         生成角块, 对应：UFR, URB, UBL, ULF, DLF, DFR, DRB, DBL
-         ('U', 'R', 'F'),0: URF
-         ('U', 'F', 'L'),1: UFL
-         ('U', 'L', 'B'),2: ULB
-         ('U', 'B', 'R'),3: UBR
-         ('D', 'F', 'R'),4: DFR
-         ('D', 'L', 'F'),5: DLF
-         ('D', 'B', 'L'),6: DBL
-         ('D', 'R', 'B'),7: DRB
-         '''
-        return [cls.get_corner_faces(pos_sign) for pos_sign in cls.CORNER_POS_SIGNS]
-
-    @classmethod
-    def get_edge_faces(cls, pos_sign: tuple[int, int, int]) -> tuple[str, str]:
-        """
-        针对边块，只涉及两个面: 非零坐标的两个轴对应的面。
-        对于一个边块的位置符号 (sx, sy, sz)，其中一个坐标为0，另两个为 ±1
-        顺序：先 Y 轴（U/D 优先），然后按右手规则排序剩余两个。
-        """
-        sx, sy, sz = pos_sign
-        assert sx * sy * sz == 0  # 必须有一个为0
-        assert len([i for i, s in enumerate([sx, sy, sz]) if s != 0]) == 2, "Edge must have exactly two non-zero coords"
-        idx = lambda s: 0 if s > 0 else - 1
-        face_x = cls.AXIS_FACE[0][idx(sx)]  # R if +x else L
-        face_y = cls.AXIS_FACE[1][idx(sy)]  # U if +y else D
-        face_z = cls.AXIS_FACE[2][idx(sz)]  # F if +z else B
-        # 优先 U/D → F/B → R/L（与社区最常见命名顺序一致）
-        if sy != 0:  # U/D 边的四个
-            primary = face_y  # U or D
-            if sz != 0:  # UF / UB / DF / DB
-                secondary = face_z
-            else:  # UR / UL / DR / DL
-                secondary = face_x
-        else:  # 中层边：FR, FL, BL, BR
-            primary = face_z  # F or B
-            secondary = face_x  # R or L
-
-        return primary, secondary
-
-    @class_property('EDGE_FACE_CYCLE')
-    def edge_face_cycle(cls) -> list[tuple]:
-        '''
-         标准顺序，顺序：先 Y 轴（U/D 优先），然后按右手规则排序剩余两个。
-         参考色放第一位（e.g., [U, R], [F, R]）
-         生成角块, 对应：
-        EDGE_INDEX_ORDER = [
-        ('U', 'R'), ('U', 'F'), ('U', 'L'), ('U', 'B'),
-        ('F', 'R'), ('F', 'L'), ('B', 'L'), ('B', 'R'),
-        ('D', 'R'), ('D', 'F'), ('D', 'L'), ('D', 'B'),
-        ]  # edge cubie 的“世界坐标顺序”
-        '''
-        return [cls.get_edge_faces(pos_sign) for pos_sign in cls.EDGE_POS_SIGNS]
 
     @class_cache(cache_name='_FACE_CACHE', key=lambda n: n)
     @classmethod
@@ -1028,29 +1308,20 @@ class CubeBase:
             rings.append(face_rings)
         return rings
 
-    @class_cache(cache_name='_CENTER_ORBITS_CACHE', key=lambda n: n)
+    @class_cache(cache_name='CENTERS_CACHE', key=lambda n: n)
     @classmethod
-    def center_orbits(cls, n: int) -> list[list[int]]:
-        """
-        返回 center orbits（按 ring / face 划分）
-        每个 orbit 是 center index 的列表
-        """
-        centers = []
-        for face in range(6):
-            for r in range(1, n - 1):
-                for c in range(1, n - 1):
-                    centers.append((face, r, c))
+    def center_coords(cls, n: int) -> list[tuple[int, int, int]]:
+        """All center sticker coords in canonical order: per face 0..5, per ring innermost→outermost, row-major.
 
-        index_map = {p: i for i, p in enumerate(centers)}  # SOLVED_CENTER_MAP
-
-        face_rings = cls.get_center_rings(n)
-        orbits = []
-        for fidx, rings in enumerate(face_rings):
-            for ring in rings:
-                orbits.append([index_map[(fidx, r, c)] for r, c, _ in ring])
-        total_centers = sum(len(o) for o in orbits)
-        assert total_centers == (n - 2) ** 2 * 6, f"Center count mismatch: {total_centers}"
-        return orbits
+        For N=3: 6 stickers (1 fixed per face). For N=4: 24 (4 per face). For N=5: 54 (9 per face).
+        """
+        rings = cls.get_center_rings(n)
+        coords = []
+        for fidx, face_rings in enumerate(rings):
+            for ring in face_rings:
+                for r, c, _ in ring:
+                    coords.append((fidx, r, c))
+        return coords
 
     @class_cache(cache_name='EDGES_CACHE', key=lambda n: n)
     @classmethod
@@ -1066,59 +1337,43 @@ class CubeBase:
         """
         stickers = cls.get_edge_stickers(n)
         assert len(stickers) == 24, f"Expected 24 edge pieces, got {len(stickers)}"
-        result = [[] for _ in range(len(cls.EDGE_POS_SIGNS))]  # list[12][2]
+        result = [[] for _ in range(len(cls.EDGE_POS_SIGNS))]
+        edge_cycle = cls.edge_face_cycle()
+
         if n % 2 == 1:
-            edges = {k: [] for k in cls.EDGE_POS_SIGNS}  # 12 条 edge
+            edges = {k: [] for k in cls.EDGE_POS_SIGNS}
             for face, r, c, pos in stickers:
-                sign = np.sign(pos).astype(int)
-                sign = tuple(sign.tolist())
+                sign = tuple(np.sign(pos).astype(int).tolist())
                 if sign in edges:
-                    edges[sign].append((face, r, c, pos))
+                    edges[sign].append((face, r, c))
 
             for eid, sign in enumerate(cls.EDGE_POS_SIGNS):
                 group = edges[sign]
                 if len(group) != 2:
                     raise ValueError(f"illegal edge {sign}: {len(group)}")
-
-                center = np.mean([p for *_, p in group], axis=0)  # 几何一致性校验
-                assert tuple(np.sign(center)) == sign, f"Sign mismatch for edge {eid}: expected {sign}"
-                # 排序：哪个贴纸法向量更“外”，就排前
-                group.sort(key=lambda x: np.argmax(np.abs(x[3])))
-                result[eid] = [(cls.face_idx[f], r, c) for f, r, c, _ in group]
+                face_order = {f: i for i, f in enumerate(edge_cycle[eid])}
+                group.sort(key=lambda x: face_order[x[0]])
+                result[eid] = [(cls.face_idx[f], r, c) for f, r, c in group]
         else:
-            pos_groups = defaultdict(list)  # 按位置坐标（四舍五入）分组
+            pos_groups = defaultdict(list)
             for face, r, c, pos in stickers:
-                key = tuple(np.round(pos, decimals=0).astype(int))  # key 是纯坐标，不带 sign
-                pos_groups[key].append((face, r, c, pos))
-                # for s in cls.EDGE_POS_SIGNS:
-                #     if np.dot(s, np.sign(pos)) == 2:
-                #         break
+                key = tuple(np.round(pos, decimals=0).astype(int))
+                pos_groups[key].append((face, r, c))
 
-            # 筛选出正好有两个贴纸的位置组（这就是中棱）
             edge_groups = [g for g in pos_groups.values() if len(g) == 2]
             if len(edge_groups) != 12:
                 raise ValueError(f"Expected 12 edge groups, got {len(edge_groups)}")
 
-            standard_edges = cls.edge_face_cycle()  # list[tuple[str,str]] 长度12，如 [("U","R"), ("U","F"), ...]
-            # 建立 边索引 ← 面对集合 的快速查找,预先生成标准顺序映射
-            face_pair_to_id = {frozenset(pair): idx for idx, pair in enumerate(standard_edges)}
+            face_pair_to_id = {frozenset(pair): idx for idx, pair in enumerate(edge_cycle)}
             for group in edge_groups:
-                if len(group) != 2:  # 是长度为 2 的列表，每项是 (face_name, r, c, pos_vec)
-                    raise ValueError(f"Edge piece should have exactly 2 stickers, got {group}")
                 faces = frozenset(g[0] for g in group)
-                eid = face_pair_to_id.get(faces)
-                if eid is None:
-                    raise ValueError(f"Unknown edge face pair: {faces}")
-                group.sort(key=lambda x: np.argmax(np.abs(x[3])))  # 根据 pos 排序：哪个轴的绝对值最大，就认为它更“外侧”
-                std_f1 = standard_edges[eid][0]
-                if group[0][0] != std_f1:  # 根据标准顺序决定贴纸存储顺序
-                    print(group)
-                    group.reverse()
+                eid = face_pair_to_id[faces]
+                face_order = {f: i for i, f in enumerate(edge_cycle[eid])}
+                group.sort(key=lambda x: face_order[x[0]])
+                result[eid] = [(cls.face_idx[f], r, c) for f, r, c in group]
 
-                result[eid] = [(cls.face_idx[f], r, c) for f, r, c, _ in group]
-
-        assert len(result) == 12, f"Expected 12 edges, got {len(result)}:{result}"
-        return result  # List[12] of [[(fidx,r,c), (fidx,r,c)]]
+        assert len(result) == 12, f"Expected 12 edges, got {len(result)}"
+        return result
 
     @class_cache(cache_name='CORNERS_CACHE', key=lambda n: n)
     @classmethod
@@ -1142,51 +1397,23 @@ class CubeBase:
         corners = {k: [] for k in cls.CORNER_POS_SIGNS}  # 8 个角
 
         for face, r, c, pos in stickers:
-            signs = np.sign(np.round(pos, decimals=5)).astype(int)
-            sx, sy, sz = signs
-            corners[(sx, sy, sz)].append((face, r, c, pos))
+            signs = tuple(np.sign(np.round(pos, decimals=5)).astype(int))
+            corners[signs].append((face, r, c))
 
-        result = [[] for _ in range(len(cls.CORNER_POS_SIGNS))]
+        result = []
+        face_cycle = cls.corner_face_cycle()
         for cid, sign in enumerate(cls.CORNER_POS_SIGNS):
             group = corners[sign]
             if len(group) != 3:
                 raise ValueError(f"illegal corner {sign}: {len(group)}")
-            center = np.mean([p for *_, p in group], axis=0)
-            assert tuple(np.sign(center)) == sign, f"Sign mismatch for corner {cid}: expected {sign}"
-            # 已正确分组后,再做主轴排序,能让起点更一致
-            group.sort(key=lambda x: np.argmax(np.abs(x[3])))
 
-            # 用法向量排序（代替 pos） 叉积排序，确保右手定则顺序
-            v_corner = np.array(sign, dtype=float)
-            # 先找该角的“U/D”面（如果有），作为起点 标准顺序 standard: ['U', 'F', 'R']
-            face_to_item = {item[0]: item for item in group}
-            start_face = next((f for f in ('U', 'D') if f in face_to_item), list(face_to_item)[0])  # 优先用 U/D 面作为起点
-            start = face_to_item[start_face]
+            # Order by pre-computed corner face cycle (CW, U/D-first)
+            face_order = {f: i for i, f in enumerate(face_cycle[cid])}
+            group.sort(key=lambda x: face_order[x[0]])
 
-            sorted_group = [start]  # 起点
-            remaining = [item for item in group if item != start]
-
-            for _ in range(2):
-                curr_f = sorted_group[-1][0]
-                curr_normal = cls.face_normal[curr_f]  # curr_pos = sorted_group[-1][3]
-                for i, next_item in enumerate(remaining):
-                    next_f = next_item[0]
-                    next_normal = cls.face_normal[next_f]  # next_pos = next_item[3]
-                    cross = np.cross(curr_normal, next_normal)
-                    if np.dot(cross, v_corner) < 0:  # 右手定则 顺时针
-                        sorted_group.append(remaining.pop(i))
-                        break
-                else:  # 如果叉积失败，fallback 到面优先级
-                    remaining.sort(key=lambda x: cls.face_idx[x[0]])
-                    sorted_group.extend(remaining)
-                    # raise ValueError(f"Cannot find consistent order for corner {cid}")
-                    break
-
-            result[cid] = [(cls.face_idx[f], r, c) for f, r, c, _ in sorted_group]
+            result.append([(cls.face_idx[f], r, c) for f, r, c in group])
 
         assert len(result) == 8, f"Expected 8 corners, got {len(result)}"
-        print([''.join([cls.FACES[y[0]] for y in x]) for x in result], '\n', cls.corner_face_cycle())
-        # ['URF', 'UFL', 'ULB', 'UBR', 'DFR', 'DLF', 'DBL', 'DRB']
         return result
 
     @staticmethod
@@ -1609,7 +1836,7 @@ class ActionToken:
         return self.axis, side, dir_norm
 
     @classmethod
-    def transform(cls, move: str, n: int = 3) -> list['ActionToken']:
+    def transform(cls, move: str, n: int = 3) -> 'ActionToken':
         """
         解析层 Human Move String → transform → sticker simulation（仅用于构表）
         通用 NxN 解析，支持标准记法：
@@ -1618,57 +1845,63 @@ class ActionToken:
             Rw, Rw', Rw2, Uw, Fw ...
             2Rw, 3Uw',2Rw2,3U,3Uw',2Fw2  等 |A| = 18
         返回实际执行的 primitive move 列表：[(axis, layer, direction), ...]
+        side:
+            0 → 正轴面 (layer > 0)
+            1 → 负轴面 (layer < 0)
         """
         if not move:
             raise ValueError("动作不能为空")
 
         mid, c = divmod(n, 2)
+        move_tmp = move
         turn_times = 1
         direction = 1
         import re
         # --- 解析方向 ---
-        if move.endswith("2"):
+        if move_tmp.endswith("2"):
             turn_times = 2
-            move = move[:-1]
+            move_tmp = move_tmp[:-1]
 
-        if move.endswith("'"):
+        if move_tmp.endswith("'"):
             direction = -1
-            move = move[:-1]
+            move_tmp = move_tmp[:-1]
 
-        # --- 正则解析宽度（前缀数字）
-        m = re.match(r"(\d*)([URFDLB])(w?)$", move)
-        if not m:
-            raise ValueError(f"无法解析动作: {move}")
-
-        width_txt, face, wide_flag = m.groups()
-        if face not in CubeBase.FACES:
-            raise ValueError(f"未知面: {face}")
-
-        # 宽度：无数字 → 默认 1；如果有 'w' 则默认 = 2
-        if width_txt:
-            width = int(width_txt)
-            if width < 1 or width > n:
-                raise ValueError(f"宽度 {width} 超出魔方阶数 {n}")
+        # --- 中心层 M/E/S ---
+        m_mid = re.match(r"([MES])$", move_tmp)
+        if m_mid:
+            mid_face = m_mid.group(1)
+            axis = {'M': 0, 'E': 1, 'S': 2}[mid_face]
+            layers = [0]
         else:
-            width = 2 if wide_flag else 1
+            # --- 正则解析宽度（前缀数字）---
+            m = re.match(r"(\d*)([URFDLB])(w?)$", move_tmp)
+            if not m:
+                raise ValueError(f"无法解析动作: {move}")
 
-        axis, side = CubeBase.face_axis[face]
-        if side == 0:  # positive_side 正轴面
-            layers = list(range(width))  # 正面方向,U:顶部向下 width 层
-        else:
-            layers = [n - 1 - i for i in range(width)]  # 反: list(range(N - 1, N - width - 1, -1))
+            width_txt, face, wide_flag = m.groups()
+            if face not in CubeGeometry.FACES:
+                raise ValueError(f"未知面: {face}")
 
-        # ---- primitive moves ----
-        prim_moves = []
-        for _ in range(turn_times):
-            for layer_idx in layers:
-                final_dir = direction if side == 0 else -direction  # “正轴面的顺时针” 在 cube 标准中方向不同
-                layer = layer_idx - mid
-                if c == 0 and layer_idx >= mid:  # 偶数阶需要跳过中心 0
-                    layer += 1
-                prim_moves.append(cls(axis, layer, final_dir))
+            # 宽度：无数字 → 默认 1；如果有 'w' 则默认 = 2
+            if width_txt:
+                width = int(width_txt)
+                if width < 1 or width > n:
+                    raise ValueError(f"宽度 {width} 超出魔方阶数 {n}")
+            else:
+                width = 2 if wide_flag else 1
 
-        return prim_moves  # 记录步骤
+            axis, side = CubeGeometry.face_axis[face]
+
+            if wide_flag or width != 1:  # 宽层：使用宽度数字
+                if c == 1 and width == 0:  # 中心层
+                    layer_abs = 0
+                else:
+                    layer_abs = (mid - width + 1) if side == 0 else -(mid - width + 1)
+                layers = [layer_abs]
+            else:
+                layers = [mid if side == 0 else - mid]
+
+        return cls(axis, layers[0], direction * turn_times)
 
     def embedding(self, n: int = 3) -> np.ndarray:
         """
@@ -1733,35 +1966,32 @@ class ActionToken:
         外层: U/U'/U2, R/R'/R2, F/F'/F2, D/D'/D2, L/L'/L2, B/B'/B2
         中心层: M/M'/M2, E/E'/E2, S/S'/S2
         宽层: 2Rw/2Rw'/2Rw2 等
+        约定：
+          - 对于正轴面（layer > 0）: 外侧第1层 =   mid,  第2层 =   mid-1, ...
+          - 对于负轴面（layer < 0）: 外侧第1层 =  -mid,  第2层 =  -mid+1, ...
         """
         if self.direction == 0:
             return 'I'  # identity
         dir_norm = self.direction % 4
-        pos_face, neg_face = CubeBase.AXIS_FACE[self.axis]
+        pos_face, neg_face = CubeGeometry.axis_face[self.axis]
         # 判断 layer 属于哪个面 (基于 n=3 的约定: mid=1, layer=±1/0)
         # 对于一般 n: |layer| == mid → 外层, layer=0 → 中心层, 其他 → 宽层
         n_est = max(3, abs(self.layer) * 2 + 1)  # 从 |layer| 估算 n
-        mid = n_est // 2
+        mid, c = divmod(n_est, 2)
         is_outer = abs(self.layer) == mid
+        is_center = (c == 1 and self.layer == 0)
+        suffix = '2' if dir_norm == 2 else ("'" if dir_norm == 3 else '')
 
         if is_outer:
             face = pos_face if self.layer > 0 else neg_face
-        elif self.layer == 0:
+        elif is_center:  # 中心层（M/E/S）不输出宽度数字
             face = ['M', 'E', 'S'][self.axis]
         else:  # 宽层: |layer| < mid → 从正面算起第 (mid - |layer|) 层 = width
-            width = mid - abs(self.layer) if self.layer > 0 else abs(self.layer) + mid - n_est + 1
-            # 简化: 用 layer 偏移表示
-            face_char = pos_face if self.layer > 0 else neg_face
-            suffix = '2' if dir_norm == 2 else ("'" if dir_norm == 3 else '')
-            return f"{abs(self.layer)}{face_char}w{suffix}"
+            k = mid - abs(self.layer) + 1
+            face = pos_face if self.layer > 0 else neg_face
+            return f"{k}{face}w{suffix}"
 
-        # direction: +1 → face, -1(≡3) → face', 2 → face2
-        if dir_norm == 2:
-            return f"{face}2"
-        elif dir_norm == 3:
-            return f"{face}'"
-        else:
-            return face
+        return f"{face}{suffix}"
 
     def __repr__(self) -> str:
         return f"ActionToken({self})"
@@ -1880,35 +2110,6 @@ class StickerCube(CubeBase):
     def faces_colors(self) -> dict:
         return self.get_colors(self.cube)
 
-    @classmethod
-    def get_colors(cls, state: np.ndarray) -> dict:
-        """返回原来使用的 face->二维字符串颜色矩阵"""
-        n = state.shape[1]
-        face_stickers = cls.get_face_stickers(n=n)  # 返回 [(r, c, pos), ...] 按渲染顺序
-        idx_color = {i: c for i, c in enumerate(cls.COLORS)}
-        result = {}
-        for fidx, face in enumerate(cls.FACES):
-            # col_mat = np.vectorize(idx_color.get)(state[fidx, :, :])
-            # result[face] = col_mat.tolist()  # 转为普通列表[[str,str]]
-            mat = np.empty((n, n), dtype='<U1')
-            coords = face_stickers[face]
-            for (r, c, _), color_idx in zip(coords, state[fidx].flatten()):
-                mat[r, c] = idx_color[color_idx]
-            result[face] = mat.tolist()
-
-        return result
-
-    @classmethod
-    def from_color(cls, cube_color: dict) -> np.ndarray:
-        # 传入的 state 是面->二维列表的映射
-        color_index = {color: i for i, color in enumerate(cls.COLORS)}
-        n = len(cube_color)
-        arr = np.zeros((6, n, n), dtype=np.uint8)
-        for fidx, face in enumerate(cls.FACES):
-            face_mat = cube_color[face]
-            arr[fidx, :, :] = np.vectorize(color_index.get)(face_mat)
-        return arr
-
     @class_status('参考方法')
     def rotate_face(self, face: str, direction: int = 1):
         """旋转一个面，direction=1顺时针，-1逆时针,axis 与 face.normal 必然平行"""
@@ -1948,9 +2149,9 @@ class StickerCube(CubeBase):
         self.act_moves(self.cube, moves)
 
     def apply_move(self, move: str):
-        primitive_moves = [t.key for t in ActionToken.transform(move)]
-        self.apply(primitive_moves)
-        return primitive_moves
+        token = ActionToken.transform(move, self.n)
+        self.act_moves(self.cube, [token.key])
+        return [token.key]
 
 
 if __name__ == "__main__":
