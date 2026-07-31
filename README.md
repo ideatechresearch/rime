@@ -1,6 +1,19 @@
 # RIME - 多领域数学建模与计算框架
 
-RIME 是一个跨领域的 Python 数学建模与计算框架，涵盖魔方求解双重建模（sticker-level + cubie-level）、遗传学计算、环形数据结构、金字塔神经网络等多个方向的算法实现与可视化。
+> [!IMPORTANT]
+> **本仓库已基本归档。** 这里保留 RIME 早期的代码、实验与数据，主要用于历史追溯；后续研究、论文、可复现脚本和当前维护内容请前往 **[dooven-prime/rime-lite](https://github.com/dooven-prime/rime-lite)**。
+
+RIME 是一个跨领域的 Python 数学建模与计算框架，涵盖魔方求解双重建模（sticker-level + cubie-level）、遗传学计算、环形数据结构、金字塔神经网络等多个方向的算法实现与可视化。本仓库反映的是项目早期探索阶段，不代表当前 RIME 研究计划的完整结构或最新结论。
+
+## 项目状态
+
+| 项目 | 说明 |
+|------|------|
+| 当前状态 | 基本归档；不再进行常规功能开发 |
+| 本仓库用途 | 保存早期原型、求解与可视化代码、探索性实验和历史数据 |
+| 后续项目 | [dooven-prime/rime-lite](https://github.com/dooven-prime/rime-lite) |
+
+`rime-lite` 延续了 RIME 的表示论与谱结构研究，但不是本仓库的直接替代包：本仓库包含魔方求解、渲染和学习模型等早期实现；新项目则将魔方作为有限表示论实验平台，集中维护论文、研究代码、验证脚本和数据契约。需要引用最新结果或参与后续工作时，请以 `rime-lite` 的 README 和公开版本为准。
 
 ## 项目结构
 
@@ -18,16 +31,21 @@ rime/
 ├── cubedrawgl.py    # 魔方可视化：OpenGL 3D渲染
 ├── cubeplot.py      # 数据可视化：训练曲线、角向低秩分析、热图
 ├── cubelearn.py     # 学习模型：CubeEnv环境、RankingCritic、Phase15Critic
+├── cubieagent.py    # 搜索智能体、混合策略与模拟环境
+├── spectralstructure.py # 谱结构、生成元分类与投影算符
+├── spectral_utils.py # 谱分解与输运分析辅助函数
 ├── dice.py          # 骰子特征分析、游戏触发器规则
 ├── body.py          # 遗传进化：人类血型遗传、新颖性搜索算法
 ├── helpers.py       # 辅助工具：DBSCAN聚类、K-means、余弦相似度、softmax
-└── option.py        # 配置选项：全局参数管理
+├── option.py        # 金融期权定价、波动率与价格过程模拟
+└── timewheel.py     # 时间轮与分层任务调度结构
 
 test/
 ├── test_cube.py          # 魔方贴纸级基础操作测试
 ├── test_cubie.py        # 魔方块级基础操作测试
 ├── test_cubieoperator.py # 群表示论实验（13个分组）
 ├── test_cubieworld.py   # 慢动力学实验（25个分组）
+├── test_spectralstructure.py # 谱结构与投影算符测试
 ├── test_circular.py     # 环形数据结构实验（11个分组）
 └── test_allele.py       # ABO血型遗传学实验（16个分组）
 ```
@@ -324,6 +342,10 @@ distance = model.heuristic(vec_a, vec_b)
 - 慢流形捕捉到宏观难度，但对远距离状态区分能力下降
 - 群表示在线性可学，move norm 稳定 (≈ 6.3)
 
+### 7. 搜索智能体与模拟 ([cubieagent.py](rime/cubieagent.py))
+
+围绕块级状态、谱特征和搜索启发式构建的探索性智能体与模拟环境，包括经典、量子启发式和混合策略。该模块属于早期实验代码，具体结果与结论应结合对应测试和数据重新验证。
+
 ### 8. 遗传学系统 ([allele.py](rime/allele.py))
 
 完整的 ABO 血型系统遗传学建模。
@@ -458,9 +480,9 @@ sim = cosine_similarity(vectors_a, vectors_b)
 probs = softmax(logits)
 ```
 
-### 14. 配置管理 ([option.py](rime/option.py))
+### 14. 金融期权与价格模拟 ([option.py](rime/option.py))
 
-全局参数配置与管理。
+包含欧式期权、近似美式期权、二叉树定价，以及波动率、趋势、几何布朗运动和蒙特卡洛模拟等探索性实现。
 
 ## 依赖项
 
@@ -488,6 +510,8 @@ pip install numpy pygame scipy torch scikit-learn joblib matplotlib pandas sympy
 ```bash
 pip install -r requirements.txt
 ```
+
+> `requirements.txt` 记录的是归档前的开发环境依赖，不保证在未来版本的 Python 或第三方库上可直接复现。建议在独立虚拟环境中安装，并根据报错锁定兼容版本。
 
 ### 方式二：逐个安装依赖
 
@@ -520,6 +544,7 @@ python test/test_cube.py
 python test/test_cubie.py
 python test/test_cubieoperator.py
 python test/test_cubieworld.py
+python test/test_spectralstructure.py
 python test/test_circular.py
 python test/test_allele.py
 ```
@@ -706,12 +731,7 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 ### 魔方群表示论
 
 - **表示空间**: Phase-1 生成元在 228 维复空间上的表示
-- **谱分解**: 5 个不变子空间，对应 5 个特征值层
-  - 守恒模态 (λ = 1): 24 维（群谐函数，精确不变）
-  - 慢速模态 (λ = 7/9): 44 维（准谐函数，V₃₂ ⊕ V₁₂）
-  - 次慢模态 (λ = 2/3): 32 维（共同不变子空间）
-  - 中速模态 (λ = 5/9): 96 维（混沌混合）
-  - 快速模态 (λ = 1/3): 32 维（快速衰减）
+- **谱分解**: 6 个不变子空间，对应 6 个特征值层
 - **慢流形**: 捕捉局部搜索结构，对 10 步内状态距离相关性 r ≈ 0.5
 - **角向低秩**: Phase-1.5 状态空间的角向变化 rank=5 可精确拟合
 - **转移算符**: A = (1/|S|)∑ρ(s)，谱分解 A = Σ λ_i E_i
@@ -746,9 +766,9 @@ dataset = env.generate_phase15_dataset(max_depth=16, num_starting_points=100, nu
 
 本项目为学术研究项目，仅供学习和研究使用。
 
-## 贡献
+## 维护与贡献
 
-欢迎提交 Issue 和 Pull Request。
+本仓库不再进行常规功能开发，代码和数据按历史状态保留。后续研究、问题讨论和新贡献请转到 [dooven-prime/rime-lite](https://github.com/dooven-prime/rime-lite)；使用本仓库时，请将其中的实验性结论视为需要重新验证的历史材料。
 
 ## 最佳实践
 
